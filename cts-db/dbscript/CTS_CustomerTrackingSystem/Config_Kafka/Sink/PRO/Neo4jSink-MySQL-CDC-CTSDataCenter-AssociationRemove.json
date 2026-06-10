@@ -1,0 +1,18 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-AssociationRemove",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.authentication.basic.password": "vn5PU@N3x6el",
+	  "topics": "ctsserver.CTS_DataCenter.AssociationRemove",
+	  "tasks.max": "1",
+	  "neo4j.server.uri": "bolt://172.18.0.3:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.AssociationRemove": "call apoc.do.case([ event.op = 'c','MATCH (c:CTSCustomer {CTSCustID: event.after.FromCTSCustID}) MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCTSCustID}) MERGE (c)-[r:HAS_EXCEPTION]->(c2) ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy RETURN r',event.op = 'u','MATCH (:CTSCustomer {CTSCustID: event.before.FromCTSCustID})-[oldR:HAS_EXCEPTION]->(:CTSCustomer {CTSCustID: event.before.ToCTSCustID}) DELETE oldR WITH event MATCH (c:CTSCustomer {CTSCustID: event.after.FromCTSCustID}) MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCTSCustID}) MERGE (c)-[r:HAS_EXCEPTION]->(c2) ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy RETURN r' ,event.op = 'd','MATCH (:CTSCustomer {CTSCustID: event.before.FromCTSCustID})-[oldR:HAS_EXCEPTION]->(:CTSCustomer {CTSCustID: event.before.ToCTSCustID}) DELETE oldR' ] ,'',{event:event}) yield value return value",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

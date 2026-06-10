@@ -1,0 +1,23 @@
+{ 
+   "name":"source-ctsdatacenter-evidence-cdc-connector",
+   "config":{
+	  "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+	  "database.allowPublicKeyRetrieval": "true",
+	  "database.user": "repDeb",
+	  "database.server.id": "10",
+	  "tasks.max": "1",
+	  "database.history.kafka.bootstrap.servers": "172.18.0.5:9092",
+	  "database.history.kafka.topic": "dbhistory.ctsevidence",
+	  "database.server.name": "ctsserver",
+	  "database.port": "3306",
+	  "include.schema.changes": "true",
+	  "table.whitelist": "CTS_DataCenter.Evidence,CTS_DataCenter.CustEvidence",
+	  "database.serverTimezone": "America/Anguilla",
+	  "database.hostname": "172.18.0.2",
+	  "database.password": "replication",
+	  "database.history.store.only.monitored.tables.ddl": "false",
+	  "database.history.skip.unparseable.ddl": "true",
+	  "database.whitelist": "CTS_DataCenter",
+	  "snapshot.mode": "when_needed"
+   }
+}

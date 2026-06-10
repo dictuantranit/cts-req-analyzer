@@ -1,0 +1,11 @@
+SELECT * FROM INFORMATION_SCHEMA.EVENTS where STATUS = 'ENABLED';
+
+ALTER EVENT CTS_DataCenter.CTS_JOB_StoreSmartGroupHistory DISABLE;
+ALTER EVENT CTS_DataCenter.CTS_DC_JOB_CountAssociatedAccountNewAssociation DISABLE;
+ALTER EVENT MonDB.Task_MonDB_dba_SP_PerformanceStats_CleanUp DISABLE;
+ALTER EVENT CTS_DataCenter.DCS_DC_JOB_TransformAccountAssociationToCTS_Retry DISABLE;
+
+ALTER EVENT CTS_DataCenter.CTS_JOB_StoreSmartGroupHistory ENABLE;
+ALTER EVENT CTS_DataCenter.CTS_DC_JOB_CountAssociatedAccountNewAssociation ENABLE;
+ALTER EVENT MonDB.Task_MonDB_dba_SP_PerformanceStats_CleanUp ENABLE;
+ALTER EVENT CTS_DataCenter.DCS_DC_JOB_TransformAccountAssociationToCTS_Retry ENABLE;

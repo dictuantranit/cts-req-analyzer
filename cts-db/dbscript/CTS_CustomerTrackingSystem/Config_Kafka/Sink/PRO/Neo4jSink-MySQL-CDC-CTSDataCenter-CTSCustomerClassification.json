@@ -1,0 +1,18 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-CTSCustomerClassification",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.authentication.basic.password": "vn5PU@N3x6el",
+	  "topics": "ctsserver.CTS_DataCenter.CTSCustomerClassification",
+	  "tasks.max": "1",
+	  "neo4j.server.uri": "bolt://172.18.0.3:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.CTSCustomerClassification": "call apoc.do.case([event.op = 'c','MERGE (c:CTSCustomer {CustID: event.after.CustID}) MERGE (ct:CustomerCategory {CategoryID: event.after.CategoryID }) MERGE (c)-[r:HAS_CATEGORY]->(ct) ON CREATE SET r.SportGroupID = event.after.SportGroupID,r.Remark = event.after.Remark, r.CreatedDate = event.after.CreatedDate ,r.CreatedBy = event.after.CreatedBy, r.LastModifiedDate = event.after.LastModifiedDate, r.LastModifiedBy = event.after.LastModifiedBy, r.LastScannedDate = event.after.LastScannedDate RETURN COUNT(*)', event.op = 'u','MATCH (:CTSCustomer {CustID: event.before.CustID})-[oldR:HAS_CATEGORY]->(:CustomerCategory {CategoryID: event.before.CategoryID}) DELETE oldR WITH event MERGE (c:CTSCustomer {CustID: event.after.CustID}) MERGE (ct:CustomerCategory {CategoryID: event.after.CategoryID }) MERGE (c)-[r:HAS_CATEGORY]->(ct) ON CREATE SET r.SportGroupID = event.after.SportGroupID, r.Remark = event.after.Remark, r.CreatedDate = event.after.CreatedDate,  r.CreatedBy = event.after.CreatedBy, r.LastModifiedDate = event.after.LastModifiedDate, r.LastModifiedBy = event.after.LastModifiedBy, r.LastScannedDate = event.after.LastScannedDate RETURN COUNT(*)', event.op = 'd','MATCH (:CTSCustomer {CustID: event.before.CustID})-[oldR:HAS_CATEGORY]->(:CustomerCategory {CategoryID: event.before.CategoryID}) DELETE oldR RETURN COUNT(*)'],'',{event:event}) yield value return value",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

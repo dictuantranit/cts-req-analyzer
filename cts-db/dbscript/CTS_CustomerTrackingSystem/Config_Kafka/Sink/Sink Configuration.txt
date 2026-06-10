@@ -1,0 +1,126 @@
+{ 
+   "name":"Neo4jSink-CTSCustomer-Connector-1267895",
+   "config":{ 
+      "topics":"mysql-jdbc-cts-CTSCustomer",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysql-jdbc-cts-CTSCustomer":"
+          MERGE (c:CTSCustomer {CTSCustID: event.CTSCustID})
+            ON CREATE SET c.SubscriberID = event.SubscriberID, c.CustID = event.CustID, c.CustSubID = event.CustSubID, c.UserName = event.UserName, c.UserName2 = event.UserName2, c.Site = event.Site, c.RoleID = event.RoleID, c.Currency = event.Currency, c.CurrencyID = event.CurrencyID, c.SRecommend = event.SRecommend, c.MRecommend = event.MRecommend, c.Recommend = event.Recommend, c.LastLoginTime = event.LastLoginTime, c.CreatedDate = event.CreatedDate
+            ON MATCH SET c.SubscriberID = event.SubscriberID, c.CustID = event.CustID, c.CustSubID = event.CustSubID, c.UserName = event.UserName, c.UserName2 = event.UserName2, c.Site = event.Site, c.RoleID = event.RoleID, c.Currency = event.Currency, c.CurrencyID = event.CurrencyID, c.SRecommend = event.SRecommend, c.MRecommend = event.MRecommend, c.Recommend = event.Recommend, c.LastLoginTime = event.LastLoginTime, c.CreatedDate = event.CreatedDate
+            CREATE (g:Group_Device)
+            SET g.CustomerQuantity = 1
+            MERGE (c)-[:BELONG_TO]->(g)
+            WITH c
+            CREATE (gip:Group_IP)
+            SET gip.CustomerQuantity = 1
+            MERGE (c)-[:BELONG_TO]->(gip)"
+   }
+}
+
+
+{ 
+   "name":"Neo4jSink-AssociationByDevice-Connector-1267895",
+   "config":{ 
+      "topics":"mysql-jdbc-cts-AssociationByDevice",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+	  "neo4j.batch.size":"10",
+	  "neo4j.batch.timeout.msecs":"300000",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysql-jdbc-cts-AssociationByDevice":"
+          MERGE (c:CTSCustomer {CTSCustID: event.CTSCustID})
+          MERGE (d:Device {DeviceId: event.DCSDeviceID})
+          WITH c,d,event
+          MERGE (c)-[r:USED_DEVICE {CTSAssDevID: event.CTSAssDevID}]->(d)
+          ON CREATE SET r.SubscriberID = event.SubscriberID, r.CreatedTime = event.CreatedTime, r.InsertTime = event.InsertTime
+          WITH c,d
+          MATCH (d)<-[:USED_DEVICE]-(c1:CTSCustomer)-[:BELONG_TO]->(g1:Group_Device)
+          WHERE c1.CTSCustID <> c.CTSCustID
+          WITH g1, c LIMIT 1
+          MATCH (c)-[:BELONG_TO]->(g:Group_Device)
+          WITH g, g1 LIMIT 1
+          WITH 
+            CASE
+                    WHEN g1.CustomerQuantity > g.CustomerQuantity THEN g1
+                    ELSE g END AS bigGroup,
+            CASE
+                    WHEN g1.CustomerQuantity > g.CustomerQuantity THEN g
+                    ELSE g1 END AS smallGroup
+          WHERE bigGroup <> smallGroup
+          WITH bigGroup, smallGroup
+          MATCH (needMergeCus:CTSCustomer)-[b:BELONG_TO]->(smallGroup)
+          SET b.Lock = true
+          MERGE (needMergeCus)-[:BELONG_TO]->(bigGroup)
+          DELETE b
+          WITH DISTINCT bigGroup, smallGroup
+          SET bigGroup.CustomerQuantity = bigGroup.CustomerQuantity + smallGroup.CustomerQuantity
+          DETACH DELETE smallGroup"
+   }
+}
+
+
+{ 
+   "name":"Neo4jSink-AssociationByIP-Connector-1267895",
+   "config":{ 
+      "topics":"mysql-jdbc-cts-AssociationByIP",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+	  "neo4j.batch.size":"10",
+	  "neo4j.batch.timeout.msecs":"300000",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysql-jdbc-cts-AssociationByIP":"
+          MERGE (c:CTSCustomer {CTSCustID: event.CTSCustID})
+          MERGE (i:IP {IPID: event.IPID})
+          WITH c,i,event
+          MERGE (c)-[r:USED_IP {CTSAssIPID: event.CTSAssIPID}]->(i)
+          ON CREATE SET r.SubscriberID = event.SubscriberID, r.CreatedTime = event.CreatedTime, r.InsertTime = event.InsertTime
+          WITH c,i
+          MATCH (i)<-[:USED_IP]-(c1:CTSCustomer)-[:BELONG_TO]->(g1:Group_IP)
+          WHERE c1.CTSCustID <> c.CTSCustID
+          WITH g1, c LIMIT 1
+          MATCH (c)-[:BELONG_TO]->(g:Group_IP)
+          WITH g, g1 LIMIT 1
+          WITH 
+            CASE
+                    WHEN g1.CustomerQuantity > g.CustomerQuantity THEN g1
+                    ELSE g END AS bigGroup,
+            CASE
+                    WHEN g1.CustomerQuantity > g.CustomerQuantity THEN g
+                    ELSE g1 END AS smallGroup
+          WHERE bigGroup <> smallGroup
+          WITH bigGroup, smallGroup
+          MATCH (needMergeCus:CTSCustomer)-[b:BELONG_TO]->(smallGroup)
+          SET b.Lock = true
+          MERGE (needMergeCus)-[:BELONG_TO]->(bigGroup)
+          DELETE b
+          WITH DISTINCT bigGroup, smallGroup
+          SET bigGroup.CustomerQuantity = bigGroup.CustomerQuantity + smallGroup.CustomerQuantity
+          DETACH DELETE smallGroup"
+   }
+}

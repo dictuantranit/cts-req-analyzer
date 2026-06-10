@@ -1,0 +1,23 @@
+﻿//
+// Remove Site
+//
+
+1 - Mark InitSub
+CALL apoc.periodic.commit("
+match (c:CTSCustomer)
+where not c:InitSub
+with c limit 500
+set c:InitSub
+RETURN COUNT(*)", {size: 500})
+
+
+2 - Init data Sub
+CALL apoc.periodic.commit("
+match (c:InitSub)
+where exists(c.SubscriberID)
+with c, c.SubscriberID as subId limit {size}
+merge (s:Subscriber {SubscriberID: subId})
+merge (c)-[r:BELONG_TO_SUB]->(s)
+on create set r.CreatedDate = datetime()
+remove c:InitSub
+RETURN COUNT(*)", {size: 5000})

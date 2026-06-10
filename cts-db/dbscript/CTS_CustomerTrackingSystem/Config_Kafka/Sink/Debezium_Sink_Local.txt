@@ -1,0 +1,123 @@
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"Neo4jSink-CTSDataCenter-CTSCustomer",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.CTSCustomer",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.CTSCustomer":"
+		call apoc.do.case([
+		event.op = 'c','MERGE (n:CTSCustomer { CTSCustID: event.after.CTSCustID }) ON CREATE SET n = event.after RETURN n'
+		,event.op = 'u','MATCH (n:CTSCustomer { CTSCustID: event.before.CTSCustID }) SET n = event.after RETURN n'
+		,event.op = 'd','MATCH (n:CTSCustomer { CTSCustID: event.before.CTSCustID }) DETACH DELETE n'],'',{event:event}) yield value
+		return value"
+   }
+}' http://localhost:8083/connectors
+
+***********************************************************************
+********************* CODING HERE *************************************
+***********************************************************************
+
+{ 
+   "name":"Neo4jSink-CTSDataCenter-CTSCustomer",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.CTSCustomer",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.CTSCustomer":"
+		call apoc.do.case([
+		event.op = 'c','MERGE (n:CTSCustomer { CTSCustID: event.after.CTSCustID }) ON CREATE SET n = event.after RETURN n'
+		,event.op = 'u','MATCH (n:CTSCustomer { CTSCustID: event.before.CTSCustID }) SET n = event.after RETURN n'
+		,event.op = 'd','MATCH (n:CTSCustomer { CTSCustID: event.before.CTSCustID }) DETACH DELETE n'],'',{event:event}) yield value
+		return value"
+   }
+}
+
+{ 
+   "name":"Neo4jSink-CTSDataCenter-AssociationByManual",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.AssociationByManual",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.AssociationByManual":"
+		call apoc.do.case([
+			event.op = 'c','MATCH (c:CTSCustomer {CTSCustID: event.after.FromCustID}) 
+							MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCustID}) 
+							MERGE (c)-[r:ADD_MANUALLY]->(c2)
+							ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy 
+							RETURN r'
+			,event.op = 'u','MATCH (CTSCustomer {CTSCustID: event.before.FromCustID})-[oldR:ADD_MANUALLY]->(:CTSCustomer {CTSCustID: event.before.ToCustID}) 
+							DELETE oldR WITH event
+							MATCH (c:CTSCustomer {CTSCustID: event.after.FromCustID}) 
+							MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCustID}) 
+							MERGE (c)-[r:ADD_MANUALLY]->(c2)
+							ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy 
+							RETURN r'
+			,event.op = 'd','MATCH (:CTSCustomer {CTSCustID: event.before.FromCustID})-[oldR:ADD_MANUALLY]->(:CTSCustomer {CTSCustID: event.before.ToCustID}) 
+							DELETE oldR'
+							]
+		,'',{event:event}) yield value return value"
+   }
+}
+
+{ 
+   "name":"Neo4jSink-CTSDataCenter-AssociationRemove",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.AssociationRemove",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.AssociationRemove":"
+		call apoc.do.case([
+			event.op = 'c','MATCH (c:CTSCustomer {CTSCustID: event.after.FromCustID}) 
+							MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCustID}) 
+							MERGE (c)-[r:HAS_EXCEPTION]->(c2)
+							ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy 
+							RETURN r'
+			,event.op = 'u','MATCH (:CTSCustomer {CTSCustID: event.before.FromCustID})-[oldR:HAS_EXCEPTION]->(:CTSCustomer {CTSCustID: event.before.ToCustID}) 
+							DELETE oldR WITH event
+							MATCH (c:CTSCustomer {CTSCustID: event.after.FromCustID}) 
+							MATCH (c2:CTSCustomer {CTSCustID: event.after.ToCustID}) 
+							MERGE (c)-[r:HAS_EXCEPTION]->(c2)
+							ON CREATE SET r.Remark = event.after.Remark,r.CreatedDate = event.after.CreatedDate,r.CreatedBy = event.after.CreatedBy 
+							RETURN r'
+			,event.op = 'd','MATCH (:CTSCustomer {CTSCustID: event.before.FromCustID})-[oldR:HAS_EXCEPTION]->(:CTSCustomer {CTSCustID: event.before.ToCustID}) 
+							DELETE oldR'
+							]
+		,'',{event:event}) yield value return value"
+   }
+}

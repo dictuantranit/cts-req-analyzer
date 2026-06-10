@@ -1,0 +1,51 @@
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"source-mysql-ctsdatacenter-jdbc-autoincrement-129065",
+   "config":{ 
+      "connector.class":"io.confluent.connect.jdbc.JdbcSourceConnector",
+      "tasks.max":"1",
+      "mode":"incrementing",
+      "connection.url":"jdbc:mysql://10.40.40.59:3306/CTS_DataCenter?useSSL=false&user=kafka&password=kafkaconnect&defaultFetchSize=10000&useCursorFetch=true&allowPublicKeyRetrieval=true",
+      "table.whitelist":"CTSCustomer",
+      "incrementing.column.name":"CTSCustID",
+      "topic.prefix":"mysql-jdbc-cts-"
+   }
+}' http://10.40.40.78:8083/connectors
+
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"source-mysql-ctsdatacenter-jdbc-autoincrement-129065",
+   "config":{ 
+      "connector.class":"io.confluent.connect.jdbc.JdbcSourceConnector",
+      "tasks.max":"1",
+      "mode":"incrementing",
+      "connection.url":"jdbc:mysql://10.18.200.72:3306/CTS_DataCenter?useSSL=false&user=kafka&password=kafkaconnect&defaultFetchSize=10000&useCursorFetch=true&allowPublicKeyRetrieval=true",
+      "table.whitelist":"CTSCustomer",
+      "incrementing.column.name":"CTSCustID",
+      "topic.prefix":"mysql-jdbc-cts-"
+   }
+}' http://localhost:8083/connectors
+
+{ 
+   "name":"source-mysql-associationbydevice-jdbc-autoincrement-129065",
+   "config":{ 
+      "connector.class":"io.confluent.connect.jdbc.JdbcSourceConnector",
+      "tasks.max":"1",
+      "mode":"incrementing",
+      "connection.url":"jdbc:mysql://10.18.200.72:3306/CTS_DataCenter?useSSL=false&user=fps&password=fps&defaultFetchSize=1000&useCursorFetch=true&allowPublicKeyRetrieval=true",
+      "table.whitelist":"AssociationByDevice",
+      "incrementing.column.name":"CTSAssDevID",
+      "topic.prefix":"mysql-jdbc-cts-"
+   }
+}
+
+{ 
+   "name":"source-mysql-associationbyip-jdbc-autoincrement-129065",
+   "config":{ 
+      "connector.class":"io.confluent.connect.jdbc.JdbcSourceConnector",
+      "tasks.max":"1",
+      "mode":"incrementing",
+      "connection.url":"jdbc:mysql://10.18.200.72:3306/CTS_DataCenter?useSSL=false&user=fps&password=fps&defaultFetchSize=5000&useCursorFetch=true&allowPublicKeyRetrieval=true",
+	  "query":"SELECT CTSAssIPID,CTSCustID,IP,CONVERT(IPID, CHAR(30)) AS IPID,SubscriberID,CreatedTime,LastLoginTime,InsertTime FROM CTS_DataCenter.AssociationByIP",
+      "incrementing.column.name":"CTSAssIPID",
+      "topic.prefix":"mysql-jdbc-cts-AssociationByIP-query"
+   }
+}

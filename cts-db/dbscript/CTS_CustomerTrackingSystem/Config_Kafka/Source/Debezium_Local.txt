@@ -1,0 +1,69 @@
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"ctscustomer-patient-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.18.200.72", 
+      "database.port": "3306", 
+      "database.user": "fps", 
+      "database.password": "fps", 
+      "database.server.id": "20072",
+      "database.server.name": "mysqllocaltest",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.CTSCustomer,CTS_DataCenter.AssociationByDevice,CTS_DataCenter.AssociationByIP",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctscustomer", 
+      "include.schema.changes": "false" 
+   }
+}' http://localhost:8083/connectors
+
+***********************************************************************
+********************* CODING HERE *************************************
+***********************************************************************
+
+{ 
+   "name":"ctscustomer-patient-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.18.200.72", 
+      "database.port": "3306", 
+      "database.user": "fps", 
+      "database.password": "fps", 
+      "database.server.id": "9",
+      "database.server.name": "mysqllocaltest",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.CTSCustomer,CTS_DataCenter.AssociationByDevice,CTS_DataCenter.AssociationByManual,CTS_DataCenter.AssociationRemove,CTS_DataCenter.Evidence,CTS_DataCenter.CustEvidence",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctscustomer", 
+      "database.history.store.only.monitored.tables.ddl": "true",
+      "database.history.skip.unparseable.ddl": "true",
+      "include.schema.changes": "true",
+      "snapshot.mode": "when_needed"
+   }
+}
+
+{ 
+   "name":"cts-evidence-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.18.200.72", 
+      "database.port": "3306", 
+      "database.user": "fps", 
+      "database.password": "fps", 
+      "database.server.id": "9",
+      "database.server.name": "mysqllocaltest",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.Evidence,CTS_DataCenter.CustEvidence",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctsevidence", 
+      "database.history.store.only.monitored.tables.ddl": "false",
+      "database.history.skip.unparseable.ddl": "true",
+      "include.schema.changes": "true",
+      "snapshot.mode": "when_needed"
+   }
+}

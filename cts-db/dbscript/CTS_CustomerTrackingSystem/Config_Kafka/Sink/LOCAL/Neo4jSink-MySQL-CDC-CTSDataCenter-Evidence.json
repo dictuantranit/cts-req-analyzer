@@ -1,0 +1,19 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-Evidence",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.authentication.basic.password": "1234aa",
+	  "topics": "ctsserver.CTS_DataCenter.Evidence,ctsserver.CTS_Admin.Subscriber",
+	  "tasks.max": "1",
+	  "neo4j.server.uri": "bolt://10.18.200.70:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.Evidence": "call apoc.do.case([event.op = 'c','MERGE (n:Evidence { EvidenceID: event.after.EvidenceID }) ON CREATE SET n = event.after RETURN n',event.op = 'u','MATCH (n:Evidence { EvidenceID: event.before.EvidenceID }) SET n = event.after RETURN n',event.op = 'd','MATCH (n:Evidence { EvidenceID: event.before.EvidenceID }) SET n:NeedDelete'],'',{event:event}) yield value return value",
+	  "neo4j.topic.cypher.ctsserver.CTS_Admin.Subscriber": "call apoc.do.case([event.op = 'c','MERGE (n:Subscriber {SubscriberID: event.after.SubscriberID }) ON CREATE SET n = event.after RETURN n',event.op = 'u','MATCH (n:Subscriber {SubscriberID: event.before.SubscriberID }) SET n = event.after RETURN n',event.op = 'd','MATCH (n:Subscriber { SubscriberID: event.before.SubscriberID }) SET n:NeedDelete'],'',{event:event}) yield value return value",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

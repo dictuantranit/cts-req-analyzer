@@ -1,0 +1,86 @@
+	#LOG=========================================================================
+    SET @SPName = 'DCS_DC_Transform_RawTrans_GetPackage';
+    SET @StartTime = CURRENT_TIMESTAMP(4);
+    INSERT INTO TransfromLog(SPName, StartTime)
+	VALUES(@SPName,@StartTime);    
+    #LOG=========================================================================	
+	#LOG=========================================================================
+    SET @LogNotes = (SELECT GROUP_CONCAT('(',tmpTT.MinTransID,',', tmpTT.MaxTransID,')') FROM  Temp_Transaction AS tmpTT);
+    
+	INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes);    
+    #LOG=========================================================================
+	
+	
+	#LOG=========================================================================
+    SET @LogStarTime = current_timestamp(4);
+    SET @SPName = 'DCS_DC_Transform_Transaction_Insert';
+    INSERT INTO TransfromLog(SPName, StartTime)
+	VALUES(@SPName,@LogStarTime);
+    #LOG=========================================================================
+	#LOG=========================================================================
+    SET @LogNotes = CONCAT(ip_FromTransID,',',ip_ToTransID);
+    
+    INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes);    
+    #LOG=========================================================================
+	
+	#LOG=========================================================================
+    SET @LogStarTime = current_timestamp(4);
+    SET @SPName = 'DCS_DC_Transform_UnhandleSubscriberAction';
+    INSERT INTO TransfromLog(SPName, StartTime)
+	VALUES(@SPName,@LogStarTime);
+    #LOG=========================================================================	
+	#LOG=========================================================================
+    SET @LogNotes = CONCAT(ip_FromTransID,',',ip_ToTransID);
+    
+    INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes); 
+    #LOG=========================================================================
+	
+	#LOG=========================================================================
+    SET @LogStarTime = current_timestamp(4);
+    SET @SPName = 'DCS_DC_Transform_UserAgent_Insert';
+    INSERT INTO TransfromLog(SPName, StartTime)
+	VALUES(@SPName,@LogStarTime);
+    #LOG=========================================================================	
+	#LOG=========================================================================
+    SET @LogNotes = CONCAT(ip_FromTransID,',',ip_ToTransID);
+    
+    INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes); 
+    #LOG=========================================================================
+	
+	#LOG=========================================================================
+    SET @LogStarTime = current_timestamp(4);
+    SET @SPName = 'DCS_DC_Transform_Device_GetPackage';
+    INSERT INTO TransfromLog(SPName, StartTime)
+	VALUES(@SPName,@LogStarTime);
+    #LOG=========================================================================	
+	#LOG=========================================================================
+    SET @LogNotes = (SELECT GROUP_CONCAT('(',BatchID,',',MinTransID,',',MaxTransID,')') 
+					FROM (SELECT BatchID, MIN(TransID) MinTransID, Max(TransID) MaxTransID FROM Temp_Trans GROUP BY BatchID) tmp);
+    
+    INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes); 
+    #LOG=========================================================================
+    
+	
+	#LOG=========================================================================
+    SET @LogStarTime = current_timestamp(4);
+    SET @SPName = 'DCS_DC_Transform_Device_Insert';
+    INSERT INTO TransfromLog(SPName, StartTime,JsonData)
+	VALUES(@SPName,@LogStarTime,ip_TransJson);
+    #LOG=========================================================================	
+	
+		#LOG=========================================================================    
+		SELECT CONCAT(Min(ts.RawTransID),',', MAX(ts.RawTransID))
+		INTO @LogNotes
+		FROM Temp_Transaction AS tmp
+		INNER JOIN DCS_DataCenter.Transaction AS ts ON tmp.TransID = ts.TransID;           
+
+		#LOG=========================================================================
+    #LOG=========================================================================    
+    INSERT INTO TransfromLog(SPName, StartTime, EndTime, LogNotes)
+	VALUES(@SPName,@LogStarTime,CURRENT_TIMESTAMP(4), @LogNotes); 
+    #LOG=========================================================================

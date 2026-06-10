@@ -1,0 +1,18 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-CTSCustomer",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.CTSCustomer": "call apoc.do.case([ event.op = 'c','MERGE (n:CTSCustomer { CTSCustID: event.after.CTSCustID }) ON CREATE SET n = event.after ON MATCH SET n = event.after WITH n, event MERGE (si:Site {SiteID: event.after.SiteID}) ON CREATE SET si.Site = event.after.Site MERGE (n)-[rs:BELONG_TO_SITE]->(si) ON CREATE SET rs.CreatedDate = datetime() MERGE (st:StaticList {ItemID: event.after.CustStatusID, ListID: 1}) MERGE (n)-[r2:HAS_STATUS]->(st) ON CREATE SET r2.CreatedDate = datetime() WITH n, event WHERE event.after.SubscriberID is not null WITH n, event MERGE (s:Subscriber {SubscriberID: event.after.SubscriberID}) MERGE (n)-[r:BELONG_TO_SUB]->(s) ON CREATE SET r.CreatedDate = datetime() RETURN COUNT(*)' ,event.op = 'u','MERGE (n:CTSCustomer {CTSCustID: event.before.CTSCustID }) SET n = event.after WITH n, event OPTIONAL MATCH (n)-[ro:BELONG_TO_SUB]->(s:Subscriber {SubscriberID: event.before.SubscriberID}) DELETE ro WITH n,event OPTIONAL MATCH (n)-[rso:BELONG_TO_SITE]->(si:Site {SiteID: event.before.SiteID}) DELETE rso WITH n,event OPTIONAL MATCH (n)-[r2o:HAS_STATUS]->(st:StaticList {ItemID: event.before.CustStatusID, ListID: 1}) DELETE r2o WITH n,event MERGE (si:Site {SiteID: event.after.SiteID}) MERGE (n)-[rs:BELONG_TO_SITE]->(si) ON CREATE SET rs.CreatedDate = datetime() MERGE (st:StaticList {ItemID: event.after.CustStatusID, ListID: 1}) MERGE (n)-[r2n:HAS_STATUS]->(st) ON CREATE SET r2n.CreatedDate = datetime() WITH n,event WHERE event.after.SubscriberID is not null MERGE (s:Subscriber {SubscriberID: event.after.SubscriberID}) MERGE (n)-[r:BELONG_TO_SUB]->(s) ON CREATE SET r.CreatedDate = datetime() RETURN COUNT(*)',event.op = 'd','MATCH (n:CTSCustomer {CTSCustID: event.before.CTSCustID }) DETACH DELETE n'],'',{event:event}) yield value return value",
+	  "neo4j.authentication.basic.password": "1234aa",
+	  "topics": "ctsserver.CTS_DataCenter.CTSCustomer",
+	  "tasks.max": "1",
+	  "neo4j.server.uri": "bolt://10.18.200.70:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

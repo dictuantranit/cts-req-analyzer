@@ -1,0 +1,168 @@
+/*<info serverAlias="CTSMain-CTS_DataCenter" databaseType="2" executers="ctsWeb" isFunction="0" isNested="0"></info>*/
+DROP PROCEDURE IF EXISTS `CTS_DataCenter`.`CTS_DC_ProblemAccountManagement_GetCategories`;
+
+DELIMITER $$
+CREATE DEFINER=`ctsOwner`@`%` PROCEDURE `CTS_DataCenter`.`CTS_DC_ProblemAccountManagement_GetCategories`(
+	IN ip_QueryType TINYINT
+)
+    SQL SECURITY INVOKER
+BEGIN
+	/*
+		Created:	20220307@Irena.Vo
+		Task:		Get Category Filter for ProblemAccount Management page
+		DB:			CTS_DataCenter
+		Original:
+		Revisions:
+			- 20220307@Irena.Vo: Created [Redmine ID: #159014]
+			- 20220407@Irena.Vo: Change logic get [Redmine ID: #170135]
+            - 20220519@Casey.Huynh: Renovate PA Process [Redmine ID: #172061]
+			- 20220628@Aries.Nguyen: Update robot classification rule [Redmine ID: #174430]            
+			- 20220830@Long.Luu: update to show for System Detect Group Betting [Redmine ID: #176976]
+            - 20230515@Casey.Huynh: New Category for Robot OCRD [Redmine ID: #186991]
+			- 20240103@Thomas.Nguyen: New Category for System Detect Unauthorized Login [RedmineID: #197710]
+            - 20240626@Thomas.Nguyen: Renovate CC phase 2 - Remove hardcode CategoryID [Redmine ID: #205317]
+			- 20240930@Adam.Tran: Return Agency Categories [Redmine ID: #185799]
+            - 20241210@Casey.Huynh: New Robot AI, Bot Login Pattern [Redmine ID: #214655]
+
+		Param's Explanation (filtered by):
+			- ip_QueryType: 
+				1: Get PA for Problem Account Management, 2: Get PA for Associated Group Monitor, 3: Get PA for Profile Page, 4: Get VVIP for Profile Page
+        Example:
+			- CALL CTS_DC_ProblemAccountManagement_GetCategories(3);
+	*/
+	DECLARE CONST_PARENTID_VVIP               	INT;
+	DECLARE CONST_AGENCY_PARENTID_VVIP          INT;
+	DECLARE CONST_CATEID_INFOBET				INT;
+	DECLARE CONST_CATEID_GROUPBETTING			INT;
+	DECLARE CONST_CATEID_HEDGING				INT;
+	DECLARE CONST_CATEID_ARBITRAGE				INT;
+	DECLARE CONST_CATEID_FIXEDGAME				INT;
+	DECLARE CONST_CATEID_IRRIGATION				INT;
+	DECLARE CONST_CATEID_FORMULABET				INT;
+	DECLARE CONST_CATEID_SYSTEMDETECTGB			INT;
+	DECLARE CONST_CATEID_UNAUTHORIZEDLOGIN		INT;
+	DECLARE CONST_CATEID_ROBOTUSER				INT;
+	DECLARE CONST_CATEID_ROBOTOCRD				INT;
+    DECLARE CONST_CATEID_BOTLOGINPATTERN		INT;
+	DECLARE CONST_AGENCY_CATEID_INFOBET			INT;
+	DECLARE CONST_AGENCY_CATEID_HEDGING			INT;
+	DECLARE CONST_AGENCY_CATEID_FORMULABET		INT;
+	DECLARE CONST_AGENCY_CATEID_FIXEDGAME		INT;
+	DECLARE CONST_AGENCY_CATEID_IRRIGATIONBET	INT;
+	DECLARE CONST_AGENCY_CATEID_ARBITRAGE		INT;
+	DECLARE CONST_AGENCY_CATEID_GROUPBETTING	INT;
+	DECLARE CONST_AGENCY_CATEID_ROBOT			INT;
+	DECLARE CONST_ROLE_MEMBER 					INT;
+	DECLARE CONST_ROLE_AGENCY					INT;
+	DECLARE CONST_CATENAME_ROBOT                VARCHAR(50);
+
+	SET CONST_PARENTID_VVIP 					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_PARENTID_VVIP');
+	SET CONST_AGENCY_PARENTID_VVIP 				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_PARENTID_VVIP');
+	SET CONST_CATEID_INFOBET 					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_INFOBET');
+	SET CONST_CATEID_GROUPBETTING 				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_GROUPBETTING');
+	SET CONST_CATEID_HEDGING 					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_HEDGING');
+	SET CONST_CATEID_ARBITRAGE 					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_ARBITRAGE');
+	SET CONST_CATEID_FIXEDGAME 					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_FIXEDGAME');
+	SET CONST_CATEID_IRRIGATION 				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_IRRIGATION');
+	SET CONST_CATEID_FORMULABET 				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_FORMULABET');
+	SET CONST_CATEID_SYSTEMDETECTGB 			= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_SYSTEMDETECTGB');
+	SET CONST_CATEID_UNAUTHORIZEDLOGIN 			= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_UNAUTHORIZEDLOGIN');
+	SET CONST_CATEID_ROBOTUSER					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_ROBOTUSER');
+	SET CONST_CATEID_ROBOTOCRD					= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_ROBOTOCRD');
+    SET CONST_CATEID_BOTLOGINPATTERN	 		= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_CATEID_BOTLOGINPATTERN');
+	SET CONST_AGENCY_CATEID_INFOBET				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_INFOBET');
+	SET CONST_AGENCY_CATEID_HEDGING				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_HEDGING');
+	SET CONST_AGENCY_CATEID_FORMULABET			= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_FORMULABET');
+	SET CONST_AGENCY_CATEID_FIXEDGAME			= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_FIXEDGAME');
+	SET CONST_AGENCY_CATEID_IRRIGATIONBET		= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_IRRIGATIONBET');
+	SET CONST_AGENCY_CATEID_ARBITRAGE			= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_ARBITRAGE');
+	SET CONST_AGENCY_CATEID_GROUPBETTING		= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_GROUPBETTING');
+	SET CONST_AGENCY_CATEID_ROBOT				= CTS_DataCenter.CTS_DC_CategoryTypeParent_Get ('CONST_AGENCY_CATEID_ROBOT');
+	SET CONST_ROLE_MEMBER		= 1;
+	SET CONST_ROLE_AGENCY		= 2;
+    SET CONST_CATENAME_ROBOT    = 'Robot User';
+
+	IF ip_QueryType = 1 THEN
+		SELECT 	cat.CategoryName
+			, 	cat.CategoryGroupID
+			, 	cat.RelevantCategoryID AS RelevantCategoryGroup
+			, 	cat.CategoryGroupID AS CategoryID
+			,	cat.CategoryPriority AS Priority
+			,	CONST_ROLE_MEMBER AS RoleGroup
+			,	CASE WHEN cat.CategoryID = CONST_CATEID_ROBOTUSER THEN 1 ELSE 0 END AS IsRobot
+		FROM CTS_DataCenter.CustomerCategory AS cat
+		WHERE	cat.CategoryID IN (CONST_CATEID_INFOBET, CONST_CATEID_GROUPBETTING, CONST_CATEID_HEDGING, CONST_CATEID_ARBITRAGE, CONST_CATEID_FIXEDGAME, CONST_CATEID_IRRIGATION
+									, CONST_CATEID_FORMULABET, CONST_CATEID_ROBOTUSER)
+				AND cat.IsActive = 1		
+		UNION
+		SELECT CASE WHEN catA.CategoryID = CONST_AGENCY_CATEID_ROBOT THEN CONST_CATENAME_ROBOT ELSE catA.CategoryName END AS CategoryName
+			, 	catA.CategoryGroupID
+			, 	catA.RelevantCategoryID AS RelevantCategoryGroup
+			, 	catA.CategoryGroupID AS CategoryID
+			,	catA.CategoryPriority AS Priority
+			,	CONST_ROLE_AGENCY AS RoleGroup
+			,	CASE WHEN catA.CategoryID = CONST_AGENCY_CATEID_ROBOT THEN 1 ELSE 0 END AS IsRobot
+		FROM CTS_DataCenter.CustomerCategoryAgency AS catA
+		WHERE	catA.CategoryID IN (CONST_AGENCY_CATEID_INFOBET, CONST_AGENCY_CATEID_HEDGING, CONST_AGENCY_CATEID_FORMULABET, CONST_AGENCY_CATEID_FIXEDGAME
+								, CONST_AGENCY_CATEID_IRRIGATIONBET, CONST_AGENCY_CATEID_ARBITRAGE, CONST_AGENCY_CATEID_GROUPBETTING, CONST_AGENCY_CATEID_ROBOT)
+				AND catA.IsActive = 1
+		ORDER BY Priority;
+	ELSEIF ip_QueryType = 2 THEN
+		SELECT 	cat.CategoryName
+			, 	cat.CategoryGroupID
+			, 	cat.RelevantCategoryID AS RelevantCategoryGroup
+			, 	cat.CategoryGroupID AS CategoryID
+			,	cat.CategoryPriority AS Priority
+			,	CONST_ROLE_MEMBER AS RoleGroup
+		FROM CTS_DataCenter.CustomerCategory AS cat
+		WHERE	cat.CategoryID IN (CONST_CATEID_INFOBET, CONST_CATEID_GROUPBETTING, CONST_CATEID_HEDGING
+								, CONST_CATEID_ARBITRAGE, CONST_CATEID_FIXEDGAME, CONST_CATEID_FORMULABET)
+				AND cat.IsActive = 1
+		ORDER BY CategoryID;
+	ELSEIF ip_QueryType = 3 THEN
+		SELECT 	cat.CategoryName
+			, 	cat.CategoryGroupID
+			, 	cat.RelevantCategoryID AS RelevantCategoryGroup
+			, 	cat.CategoryGroupID AS CategoryID
+			,	cat.CategoryPriority AS Priority
+			,	CONST_ROLE_MEMBER AS RoleGroup
+			,	CASE WHEN cat.CategoryID IN (CONST_CATEID_ROBOTUSER, CONST_CATEID_ROBOTOCRD,CONST_CATEID_BOTLOGINPATTERN) THEN 1 ELSE 0 END AS IsRobot
+			,	CASE WHEN cat.CategoryID IN (CONST_CATEID_SYSTEMDETECTGB, CONST_CATEID_UNAUTHORIZEDLOGIN, CONST_CATEID_ROBOTOCRD,CONST_CATEID_BOTLOGINPATTERN) THEN 1 ELSE 0 END AS IsDisabled
+		FROM CTS_DataCenter.CustomerCategory AS cat
+		WHERE 	cat.CategoryID IN (	CONST_CATEID_INFOBET, CONST_CATEID_GROUPBETTING, CONST_CATEID_HEDGING
+									, CONST_CATEID_ARBITRAGE, CONST_CATEID_FIXEDGAME, CONST_CATEID_IRRIGATION
+									, CONST_CATEID_FORMULABET, CONST_CATEID_SYSTEMDETECTGB, CONST_CATEID_UNAUTHORIZEDLOGIN
+                                    , CONST_CATEID_ROBOTUSER, CONST_CATEID_ROBOTOCRD,CONST_CATEID_BOTLOGINPATTERN)
+				AND cat.IsActive = 1
+		UNION
+		SELECT 	catA.CategoryName
+			, 	catA.CategoryGroupID
+			, 	catA.RelevantCategoryID AS RelevantCategoryGroup
+			, 	catA.CategoryGroupID AS CategoryID
+			,	catA.CategoryPriority AS Priority
+			,	CONST_ROLE_AGENCY AS RoleGroup
+			,   CASE WHEN catA.CategoryID = CONST_AGENCY_CATEID_ROBOT THEN 1 ELSE 0 END AS IsRobot
+			,	0 AS IsDisabled
+			FROM CTS_DataCenter.CustomerCategoryAgency AS catA
+			WHERE	catA.CategoryID IN (CONST_AGENCY_CATEID_INFOBET, CONST_AGENCY_CATEID_HEDGING, CONST_AGENCY_CATEID_FORMULABET
+										, CONST_AGENCY_CATEID_FIXEDGAME, CONST_AGENCY_CATEID_IRRIGATIONBET, CONST_AGENCY_CATEID_ARBITRAGE
+                                        , CONST_AGENCY_CATEID_GROUPBETTING, CONST_AGENCY_CATEID_ROBOT)
+				AND catA.IsActive = 1
+		ORDER BY RoleGroup, Priority, CategoryID;
+	ELSEIF ip_QueryType = 4 THEN
+		SELECT	cat.CategoryID
+			,	cat.CategoryName
+			, 	CONST_ROLE_MEMBER AS RoleID
+		FROM CTS_DataCenter.CustomerCategory AS cat
+		WHERE cat.ParentID = CONST_PARENTID_VVIP
+		UNION
+		SELECT	catA.CategoryID
+			,	catA.CategoryName
+			, 	catA.RoleID
+		FROM CTS_DataCenter.CustomerCategoryAgency AS catA
+		WHERE catA.ParentID = CONST_AGENCY_PARENTID_VVIP;
+	END IF;
+
+END$$
+DELIMITER ;
+

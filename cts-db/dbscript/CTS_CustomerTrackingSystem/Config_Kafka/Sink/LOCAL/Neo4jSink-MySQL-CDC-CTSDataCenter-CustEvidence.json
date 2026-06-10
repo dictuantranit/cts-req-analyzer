@@ -1,0 +1,18 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-CustEvidence",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.authentication.basic.password": "1234aa",
+	  "topics": "ctsserver.CTS_DataCenter.CustEvidence",
+	  "tasks.max": "1",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.CustEvidence": "call apoc.do.case([event.op = 'c' AND event.after.Level = 0,'MERGE (c:CTSCustomer {CTSCustID: event.after.CTSCustID}) MERGE (e:Evidence {EvidenceID: event.after.EvidenceID}) MERGE (c)-[r:HAS_EVIDENCE]->(e) ON CREATE SET r.Remark = event.after.Remark, r.CreatedDate = event.after.CreatedDate, r.CreatedBy = event.after.CreatedBy', event.op = 'u' AND event.before.Level = 0,'MATCH (c:CTSCustomer {CTSCustID: event.before.CTSCustID})-[r:HAS_EVIDENCE]->(e:Evidence {EvidenceID: event.before.EvidenceID}) SET r.Remark = event.before.Remark, r.CreatedDate = event.before.CreatedDate, r.CreatedBy = event.before.CreatedBy', event.op = 'd' AND event.before.Level = 0,'MATCH (c:CTSCustomer {CTSCustID: event.before.CTSCustID})-[r:HAS_EVIDENCE]->(e:Evidence {EvidenceID: event.before.EvidenceID}) DELETE r'],'',{event:event}) yield value return value",
+	  "neo4j.server.uri": "bolt://10.18.200.70:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

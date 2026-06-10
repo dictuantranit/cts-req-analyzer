@@ -1,0 +1,9 @@
+﻿//
+// Remove Site
+//
+
+CALL apoc.periodic.commit("
+match (c:CTSCustomer)-[r:BELONG_TO_SITE]->(s:Site)
+with r limit 500
+delete r
+RETURN COUNT(*)", {size: 500})

@@ -1,0 +1,90 @@
+version: '3.7'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper
+    hostname: ${ZOOKEEPER_HOST}
+    container_name: ${ZOOKEEPER_HOST}
+    restart: always
+    ports:
+      - "${ZOOKEEPER_PORT}:2181"
+    volumes:
+      - ${ZOOKEEPER_DATA}:/var/lib/zookeeper/data
+      - ${ZOOKEEPER_LOGS}:/var/lib/zookeeper/log
+
+    environment:
+      ZOOKEEPER_CLIENT_PORT: ${ZOOKEEPER_PORT}
+      ZOOKEEPER_TICK_TIME: 2000
+      TZ: ${APP_TZ}
+    networks:
+      app_network:
+        aliases:
+          - ${ZOOKEEPER_HOST}
+
+  kafka:
+    image: confluentinc/cp-enterprise-kafka
+    hostname: ${KAFKA_HOST}
+    container_name: ${KAFKA_HOST}
+    restart: always
+    depends_on:
+      - zookeeper
+    ports:
+      - "${KAFKA_PORT}:9092"
+    expose:
+      - "${KAFKA_PORT_INTERNAL}"
+    volumes:
+      - ${KAFKA_DATA}:/var/lib/kafka/data
+      - ${KAFKA_LOGS}:/var/lib/kafka/log:rw
+      
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: ${KAFKA_HOST}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_HOST}:${KAFKA_PORT_INTERNAL},OUTSIDE://${KAFKA_HOST}:${KAFKA_PORT}
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:${KAFKA_PORT_INTERNAL},OUTSIDE://0.0.0.0:${KAFKA_PORT}
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: '${ZOOKEEPER_HOST}:${ZOOKEEPER_PORT}'
+      KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: ${KAFKA_HOST}:${KAFKA_PORT_INTERNAL}
+      CONFLUENT_METRICS_REPORTER_ZOOKEEPER_CONNECT: '${ZOOKEEPER_HOST}:${ZOOKEEPER_PORT}'
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+      CONFLUENT_METRICS_ENABLE: 'true'
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+      #KAFKA_LOG_CLEANER_ENABLE: 'true'
+      #KAFKA_LOG_CLEANUP_POLICY: 'delete'
+      KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS}
+      KAFKA_RETENTION_MS: ${KAFKA_RETENTION_MS}
+      KAFKA_DELETE_RETENTION_MS: ${KAFKA_DELETE_RETENTION_MS}
+      TZ: ${APP_TZ}
+    networks:
+      app_network:
+        aliases:
+          - ${KAFKA_HOST}
+
+  schema_registry:
+    image: confluentinc/cp-schema-registry
+    hostname: ${REGISTRY_HOST}
+    container_name: ${REGISTRY_HOST}
+    restart: always
+    depends_on:
+      - zookeeper
+      - kafka
+    ports:
+      - "${REGISTRY_PORT}:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: ${REGISTRY_HOST}
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: '${ZOOKEEPER_HOST}:${ZOOKEEPER_PORT}'
+      TZ: ${APP_TZ}
+    networks:
+      app_network:
+        aliases:
+          - ${REGISTRY_HOST}
+      
+networks:
+  app_network:
+    external: ${NETWORK_EXTERNAL}
+    name: ${NETWORK_NAME}
+    driver: ${NETWORK_DRIVER}
+    

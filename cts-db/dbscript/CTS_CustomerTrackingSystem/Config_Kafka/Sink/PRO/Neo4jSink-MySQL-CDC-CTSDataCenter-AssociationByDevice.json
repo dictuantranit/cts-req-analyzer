@@ -1,0 +1,18 @@
+{ 
+   "name":"Neo4jSink-MySQL-CDC-CTSDataCenter-AssociationByDevice",
+   "config":{
+	  "connector.class": "streams.kafka.connect.sink.Neo4jSinkConnector",
+	  "neo4j.topic.cypher.ctsserver.CTS_DataCenter.AssociationByDevice": "call apoc.do.case([ event.op = 'c','MERGE (c:CTSCustomer {CTSCustID: event.after.CTSCustID}) MERGE (d:Device {DeviceId: event.after.DCSDeviceID}) MERGE (c)-[r:USED_DEVICE {CTSAssDevID: event.after.CTSAssDevID}]->(d) ON CREATE SET r.SubscriberID = event.after.SubscriberID, r.CreatedTime = event.after.CreatedTime, r.InsertTime = event.after.InsertTime' ,event.op = 'u','MATCH (:CTSCustomer {CTSCustID: event.before.CTSCustID})-[ro:USED_DEVICE]->(:Device {DeviceId: event.before.DCSDeviceID}) DELETE ro MERGE (c:CTSCustomer {CTSCustID: event.after.CTSCustID}) MERGE (d:Device {DeviceId: event.after.DCSDeviceID}) MERGE (c)-[r:USED_DEVICE {CTSAssDevID: event.after.CTSAssDevID}]->(d) ON CREATE SET r.SubscriberID = event.after.SubscriberID, r.CreatedTime = event.after.CreatedTime, r.InsertTime = event.after.InsertTime' ,event.op = 'd','MATCH (c:CTSCustomer {CTSCustID: event.before.CTSCustID})-[r:USED_DEVICE]->(d:Device {DeviceId: event.before.DCSDeviceID}) DELETE r'],'',{event:event}) yield value return value",
+	  "errors.retry.timeout": "-1",
+	  "errors.log.include.messages": "true",
+	  "neo4j.authentication.basic.password": "vn5PU@N3x6el",
+	  "topics": "ctsserver.CTS_DataCenter.AssociationByDevice",
+	  "tasks.max": "1",
+	  "neo4j.server.uri": "bolt://172.18.0.3:7687",
+	  "errors.retry.delay.max.ms": "1000",
+	  "neo4j.authentication.basic.username": "neo4j",
+	  "errors.tolerance": "all",
+	  "neo4j.encryption.enabled": "false",
+	  "errors.log.enable": "true"
+   }
+}

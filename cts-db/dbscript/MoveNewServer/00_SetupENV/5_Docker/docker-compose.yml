@@ -1,0 +1,68 @@
+version: '2.4'
+networks:
+  app_network:
+    external: ${EXTERNAL_NETWORK}
+    name: ${MYSQL_NETWORK}
+    driver: ${DRIVER_NETWORK}
+
+services:
+  mysql:
+    image: mysql:${MYSQL_TAG}
+    container_name: ${MYSQL_HOST}
+    hostname: ${MYSQL_HOST}
+    cap_add:
+      - SYS_NICE  # CAP_SYS_NICE
+    #privileged: true
+    mem_limit: 40g
+    memswap_limit: 128m
+    mem_reservation: 512m
+
+    volumes:
+      - app_volume:/var/lib/mysql:rw
+      - ${MYSQL_LOG}:/var/log/mysql:rw
+      - ${MYSQL_CONF}/custom-mysql.cnf:/etc/mysql/conf.d/custom-mysql.cnf
+      - ${MYSQL_TMP}:/var/log/mysql/tmp:rw
+      - ${MYSQL_BINLOG}:/var/log/mysql/binlog:rw
+
+    env_file:
+      - ./mysql.env
+
+    ports:
+      - '${MYSQL_PORT}:3306'
+
+    networks:
+      app_network:
+        aliases:
+          - ${MYSQL_HOST}
+
+    restart: always
+  neo4j:
+    image: neo4j:3.5.12-enterprise
+    container_name: cts_neo4j_master
+    hostname: cts_neo4j_master
+
+    volumes:
+      - /dev/mapper/volumes/neo4j_master/conf:/var/lib/neo4j/conf
+      - /dev/mapper/volumes/neo4j_master/data:/var/lib/neo4j/data
+      - /dev/mapper/volumes/neo4j_master/import:/var/lib/neo4j/import
+      - /dev/mapper/volumes/neo4j_master/plugins:/var/lib/neo4j/plugins
+      - /dev/mapper/volumes/neo4j_master/logs:/var/lib/neo4j/logs
+      - /dev/mapper/volumes/neo4j_master/metrics:/var/lib/neo4j/metrics
+
+    env_file:
+      - ./neo4j_master.env
+
+    ports:
+      - 7474:7474
+      - 7687:7687
+    networks:
+      app_network:
+        aliases:
+          - ${MYSQL_HOST}
+
+    restart: always
+
+volumes:
+  app_volume:
+    external: ${EXTERNAL_VOLUME}
+    name: ${DATA_VOLUME}

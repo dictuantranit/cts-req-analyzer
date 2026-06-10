@@ -1,0 +1,23 @@
+{ 
+   "name":"source-ctsdatacenter-AIassociation-cdc-connector",
+   "config":{
+	"connector.class": "io.debezium.connector.mysql.MySqlConnector",
+	"database.allowPublicKeyRetrieval": "true",
+	"database.server.id": "12",
+	"tasks.max": "1",
+	"database.history.kafka.bootstrap.servers": "localhost:9092",
+	"database.history.kafka.topic": "dbhistory.AIAssociation.ctsserver",
+	"database.server.name": "ctsserver",
+	"database.port": "3307",
+	"include.schema.changes": "true",
+	"table.whitelist": "CTS_DataCenter.AssociationByAI",
+	"database.serverTimezone": "America/La_Paz",
+	"database.user": "repDeb",
+	"database.hostname": "10.18.200.70",
+	"database.password": "replication",
+	"database.history.store.only.monitored.tables.ddl": "true",
+	"database.history.skip.unparseable.ddl": "true",
+	"database.whitelist": "CTS_DataCenter",
+	"snapshot.mode": "when_needed"
+   }
+}

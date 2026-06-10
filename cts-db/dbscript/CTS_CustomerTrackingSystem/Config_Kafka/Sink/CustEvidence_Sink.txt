@@ -1,0 +1,51 @@
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"Neo4jSink-CTSDataCenter-CTSCustomer",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.CTSCustomer",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.CTSCustomer":"
+		call apoc.do.case([
+		event.op = 'c','MERGE (n:CTSCustomer { EvidenceID: event.after.EvidenceID }) ON CREATE SET n = event.after RETURN n'
+		,event.op = 'u','MATCH (n:CTSCustomer { EvidenceID: event.before.EvidenceID }) SET n = event.after RETURN n'
+		,event.op = 'd','MATCH (n:CTSCustomer { EvidenceID: event.before.EvidenceID }) DETACH DELETE n'],'',{event:event}) yield value
+		return value"
+   }
+}' http://localhost:8083/connectors
+
+***********************************************************************
+********************* CODING HERE *************************************
+***********************************************************************
+
+{ 
+   "name":"Neo4jSink-CTSDataCenter-CustEvidence",
+   "config":{ 
+      "topics":"mysqllocaltest.CTS_DataCenter.CustEvidence",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.70:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaltest.CTS_DataCenter.CustEvidence":"
+		call apoc.do.case([
+		event.op = 'c' AND event.after.Level = 0,'MATCH (c:CTSCustomer {CTSCustID: event.after.CTSCustID}) MATCH (e:Evidence {EvidenceID: event.after.EvidenceID}) MERGE (c)-[r:HAS_EVIDENCE]->(e) ON CREATE SET r.Remark = event.after.Remark, r.CreatedDate = event.after.CreatedDate, r.CreatedBy = event.after.CreatedBy'
+		,event.op = 'u' AND event.before.Level = 0,'MATCH (c:CTSCustomer {CTSCustID: event.before.CTSCustID})-[r:HAS_EVIDENCE]->(e:Evidence {EvidenceID: event.before.EvidenceID}) SET r.Remark = event.before.Remark, r.CreatedDate = event.before.CreatedDate, r.CreatedBy = event.before.CreatedBy'
+		,event.op = 'd' AND event.before.Level = 0,'MATCH (c:CTSCustomer {CTSCustID: event.before.CTSCustID})-[r:HAS_EVIDENCE]->(e:Evidence {EvidenceID: event.before.EvidenceID}) DELETE r'],'',{event:event}) yield value
+		return value"
+   }
+}

@@ -1,0 +1,23 @@
+{ 
+   "name":"Neo4jSink-Covid19VN-Patient",
+   "config":{ 
+      "topics":"mysqllocaldev.Covid19VN.Patient",
+      "connector.class":"streams.kafka.connect.sink.Neo4jSinkConnector",
+      "tasks.max": "1",
+      "errors.retry.timeout":"-1",
+      "errors.retry.delay.max.ms":"1000",
+      "errors.tolerance":"all",
+      "errors.log.enable":"true",
+      "errors.log.include.messages":"true",
+      "neo4j.server.uri":"bolt://10.18.200.73:7687",
+      "neo4j.authentication.basic.username":"neo4j",
+      "neo4j.authentication.basic.password":"1234aa",
+      "neo4j.encryption.enabled":"false",
+      "neo4j.topic.cypher.mysqllocaldev.Covid19VN.Patient":"
+		call apoc.do.case([
+		event.op = 'c','CREATE (n:Patient) SET n = event.after RETURN n'
+		,event.op = 'u','MATCH (n:Patient { PatientId: event.before.PatientId }) SET n = event.after RETURN n'
+		,event.op = 'd','MATCH (n:Patient { PatientId: event.before.PatientId }) DETACH DELETE n'],'',{event:event}) yield value
+		return value"
+   }
+}

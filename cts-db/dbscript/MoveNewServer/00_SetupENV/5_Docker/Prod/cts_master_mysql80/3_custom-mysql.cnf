@@ -1,0 +1,91 @@
+[client]
+default-character-set       = utf8
+
+[mysql]
+default-character-set       = utf8
+
+[mysqld]
+user=mysql
+character-set-server        = utf8
+collation-server            = utf8_unicode_ci
+
+key_buffer_size             = 16M
+max_allowed_packet          = 32M
+thread_stack                = 192K
+thread_cache_size           = 12
+max_connections             = 2000
+
+#I/O threads
+innodb_read_io_threads = 12
+innodb_write_io_threads = 12
+
+#recommendation
+innodb_file_per_table=ON
+innodb_stats_on_metadata = OFF
+innodb_buffer_pool_chunk_size = 2G
+innodb_buffer_pool_instances = 16 #(or 1 if innodb_buffer_pool_size < 1GB)
+innodb_buffer_pool_size = 32G # (adjust value here, 50%-70% of total RAM)
+innodb_log_file_size = 512M
+innodb_flush_log_at_trx_commit = 1 # may change to 2 or 0
+innodb_flush_method = O_DIRECT
+innodb_buffer_pool_dump_pct = 50
+
+#tmp
+tmpdir = /var/log/mysql/tmp
+
+#biglog
+log_bin = /var/log/mysql/binlog/binlog.log
+relay_log = /var/log/mysql/binlog/replay-bin.log
+
+#mysql logs
+#TABLE|FILE
+log_output = FILE
+
+#startup log
+general_log = 0
+general_log_file = /var/log/mysql/general.log
+
+#error log
+log_error=/var/log/mysql/error.log
+#1: ERROR
+#2: ERROR, WARNING
+#3: ERROR, WARNING, INFORMATION
+log_error_verbosity = 1
+
+
+#slow logs
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow_query.log
+long_query_time = 10 #10s
+
+
+# --------------------------
+# Transaction Isolation Level Configuration
+# --------------------------
+transaction_isolation       = "READ-COMMITTED"
+
+# --------------------------
+# Extend Group Concat limitation
+# --------------------------
+group_concat_max_len        = 1048576
+
+# --------------------------
+# Security Configuration
+# --------------------------
+activate_all_roles_on_login = 1
+
+#replication
+default_authentication_plugin=mysql_native_password
+server_id = 4058
+gtid_mode=ON
+enforce_gtid_consistency=ON
+
+#binlog dbs
+#binlog_do_db   = db
+
+#replicated db
+#replicate_do_db = xxxxx
+
+#ROW|STATEMENT|MIXED
+binlog_format=ROW
+log_slow_slave_statements=1

@@ -1,0 +1,63 @@
+version: '3.7'
+
+services:
+  neo4j:
+    image: neo4j:${NEO4J_TAG}
+    hostname: ${NEO4J_HOST}
+    container_name: ${NEO4J_HOST}
+    restart: always
+    ports:
+      - "${NEO4J_PORT_WEB}:7474"
+      - "${NEO4J_PORT_BOLT}:7687"
+    volumes:
+      - ${NEO4J_PLUGINS}:/plugins:rw
+      - ${NEO4J_DATA}:/data:rw
+      - ${NEO4J_LOGS}:/logs:rw
+      - ${NEO4J_IMPORT}:/var/lib/neo4j/import:rw
+      - ${NEO4J_RUN}:/var/lib/neo4j/run:rw
+      #- ${NEO4J_CONF}:/var/lib/neo4j/conf:rw
+
+    environment:
+      #neo4j-server
+      NEO4J_AUTH: neo4j/admin
+      NEO4J_dbms_default__database: cts-datacenter
+      NEO4J_dbms_memory_heap_initial__size: ${NEO4J_DBMS_MEMORY_HEAP_INIT}
+      NEO4J_dbms_memory_heap_max__size: ${NEO4J_DBMS_MEMORY_HEAP_MAX}
+      NEO4J_dbms_memory_pagecache_size: ${NEO4J_DBMS_MEMORY_PAGECACHE}
+      NEO4J_dbms_memory_transaction_global__max__size: ${NEO4J_DBMS_MEMORY_TXN_GLOBAL}
+      NEO4J_dbms_memory_transaction_database__max__size: ${NEO4J_DBMS_MEMORY_TXN_DB}
+      NEO4J_dbms_memory_transaction_max__size: ${NEO4J_DBMS_MEMORY_TXN}
+      NEO4J_dbms_logs_debug_level: ${NEO4J_DEBUG_LEVEL}
+      #NEO4J_dbms_tx__log_rotation_retention__policy: ${NEO4J_TXN_LOG_ROTATION_SIZE}:
+      NEO4J_dbms_windows__service__name: ${NEO4J_HOST}
+      TZ: ${NEO4J_TZ}
+      
+      #kafka-server
+      NEO4J_kafka_zookeeper_connect: ${ZOOKEEPER_CONNECT}
+      NEO4J_kafka_bootstrap_servers: ${KAFKA_CONNECT}
+      NEO4J_kafka_group_id: ${NEO4J_HOST}
+
+    env_file:
+      - ./neo4j.env
+      - ./kafka.env 
+      - ./sink/evidence.cypher
+      - ./sink/subscriber.cypher
+      - ./sink/associationbydevice.cypher
+      - ./sink/staticlist.cypher
+      - ./sink/custevidence.cypher
+      - ./sink/customercategory.cypher
+      - ./sink/ctscustomerclassification.cypher
+      - ./sink/ctscustomer.cypher
+      - ./sink/associationremove.cypher
+      - ./sink/associationbymanual.cypher
+    networks:
+      app_network:
+        aliases:
+          - ${NEO4J_HOST}
+      
+networks:
+  app_network:
+    external: ${NETWORK_EXTERNAL}
+    name: ${NETWORK_NAME}
+    driver: ${NETWORK_DRIVER}
+    

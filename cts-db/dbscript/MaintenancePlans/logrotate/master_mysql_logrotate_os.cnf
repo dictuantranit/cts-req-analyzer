@@ -1,0 +1,15 @@
+/dev/mapper/volumes/cts_master_mysql80/log/general.log
+/dev/mapper/volumes/cts_master_mysql80/log/error.log
+/dev/mapper/volumes/cts_master_mysql80/log/slow_query.log
+{
+        su root docker
+        compress
+        dateext
+        maxsize 300M
+        copytruncate
+        maxage 365
+        dateformat -%Y%m%d%s
+        daily
+        rotate 30
+        notifempty
+}

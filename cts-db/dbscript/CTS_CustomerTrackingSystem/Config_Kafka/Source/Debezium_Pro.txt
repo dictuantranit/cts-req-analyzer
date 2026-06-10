@@ -1,0 +1,70 @@
+curl -X POST -H "Content-Type: application/json" --data '{ 
+   "name":"source-ctsdatacenter-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.40.40.59", 
+      "database.port": "3306", 
+      "database.user": "repDeb", 
+      "database.password": "replication", 
+      "database.server.id": "9",
+      "database.server.name": "ctsserver",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.CTSCustomer,CTS_DataCenter.AssociationByDevice,CTS_DataCenter.AssociationByIP",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctsserver", 
+      "include.schema.changes": "true" 
+   }
+}' http://10.40.40.78:8083/connectors
+
+
+***********************************************************************
+********************* CODING HERE *************************************
+***********************************************************************
+
+{ 
+   "name":"source-ctsdatacenter-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.40.40.58", 
+      "database.port": "3306", 
+      "database.user": "repDeb", 
+      "database.password": "replication", 
+      "database.server.id": "9",
+      "database.server.name": "ctsserver",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.CTSCustomer,CTS_DataCenter.AssociationByDevice,CTS_DataCenter.AssociationByManual,CTS_DataCenter.AssociationRemove",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctscustomer", 
+      "database.history.store.only.monitored.tables.ddl": "false",
+      "database.history.skip.unparseable.ddl": "true",
+      "include.schema.changes": "true",
+      "snapshot.mode": "schema_only_recovery"
+   }
+}
+
+{ 
+   "name":"source-ctsdatacenter-evidence-cdc-connector",
+   "config":{ 
+      "connector.class":"io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max":"1",
+      "database.hostname": "10.40.40.58", 
+      "database.port": "3306", 
+      "database.user": "repDeb", 
+      "database.password": "replication", 
+      "database.server.id": "10",
+      "database.server.name": "ctsserver",
+      "database.allowPublicKeyRetrieval":"true",
+      "database.whitelist": "CTS_DataCenter", 
+      "table.whitelist":"CTS_DataCenter.Evidence,CTS_DataCenter.CustEvidence",
+      "database.history.kafka.bootstrap.servers": "localhost:9092", 
+      "database.history.kafka.topic": "dbhistory.ctsevidence", 
+      "database.history.store.only.monitored.tables.ddl": "false",
+      "database.history.skip.unparseable.ddl": "true",
+      "include.schema.changes": "true",
+      "snapshot.mode": "schema_only_recovery"
+   }
+}
