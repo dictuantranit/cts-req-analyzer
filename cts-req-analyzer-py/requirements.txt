@@ -1,0 +1,17 @@
+# Core LangChain dependencies
+langchain
+openai
+
+# For Gemini API (works with Python 3.7+)
+requests
+
+# Vector Store (using FAISS - simpler than ChromaDB)
+faiss-cpu
+
+# Utilities
+python-dotenv
+pydantic
+
+# API Server
+fastapi
+uvicorn[standard]
