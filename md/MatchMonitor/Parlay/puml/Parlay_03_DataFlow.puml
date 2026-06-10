@@ -1,0 +1,130 @@
+@startuml Parlay_DataFlow
+!theme plain
+title Parlay Group Betting - Data Flow (MainDB to CTS to Website)
+
+' Define colors
+!define MAINDB_COLOR #E3F2FD
+!define STAGING_COLOR #FFF9C4
+!define PROCESS_COLOR #C8E6C9
+!define COMPLETE_COLOR #FFCCBC
+!define WEB_COLOR #E1BEE7
+
+' ============================================
+' MAIN DATABASE (SQL SERVER)
+' ============================================
+rectangle "**MainDB (SQL Server - bodb02)**" MAINDB_COLOR {
+    database "**bettrans**\n\n- sequenceid (PK)\n- transid\n- refno\n- custid\n- transdate\n- betteam = 1 (Mix Parlay)\n- bettype = 29\n- matchid = 29\n- BetCheck (bit 2 or 3)" as BetTrans #BBDEFB
+    
+    database "**bettransm**\n\n- refno (FK)\n- transid (detail)\n- matchid\n- bettype\n- betid\n- betteam\n- LiveIndicator" as BetTransM #BBDEFB
+    
+    database "**match**\n\n- matchid\n- sporttype\n- livehomescore\n- liveawayscore\n- eventdate\n- eventstatus" as Match #BBDEFB
+    
+    database "**league**\n\n- leagueid\n- leaguename" as League #BBDEFB
+}
+
+' ============================================
+' STAGING TABLES (MYSQL)
+' ============================================
+rectangle "**Staging Tables (MySQL CTS)**" STAGING_COLOR {
+    database "**MatchMonitorParlayStaging\nGroupBettingLive**\n\n- SequenceID (PK)\n- TransID\n- Refno\n- TransIDm (detail)\n- MatchID\n- SportType\n- ScoreDiff\n- BettypeID\n- BetID\n- Betteam\n- CustID\n- CTSCustID\n- TransDateToSecond\n- GroupID" as StagingLive #FFF59D
+    
+    database "**MatchMonitorParlayStaging\nGroupBettingNonLive**\n\n(Same structure as Live)" as StagingNonLive #FFF59D
+}
+
+' ============================================
+' RESULT TABLES (MYSQL)
+' ============================================
+rectangle "**Result Tables (MySQL CTS)**" COMPLETE_COLOR {
+    database "**MatchMonitor**\n\n- MatchID\n- IsMajorLeague\n- BettypeID\n- BetID\n- LiveIndicator\n- EventDate\n- KickOffTime\n- EventStatus\n- HomeID\n- AwayID\n- LeagueID\n- LeagueName\n- Sporttype\n- **Reason = 5 (Parlay GB)**" as TableMatch #FFAB91
+    
+    database "**MatchMonitorDetails**\n\n- ID (PK)\n- MatchID\n- IsMajorLeague\n- LiveIndicator\n- ScoreDiff\n- BettypeID\n- BetID\n- Betteam\n- EventDate\n- LiveHomeScore\n- LiveAwayScore\n- **ListCustID**\n- **ListTransID** (Refno list)\n- **Reason = 5**\n- **GroupID**" as TableDetail #FFAB91
+}
+
+' ============================================
+' WEBSITE
+' ============================================
+rectangle "**Website - Match Monitor Page**" WEB_COLOR {
+    component [Match Monitor Page\n\n- Display dangerous matches\n- Show customer CC status\n- Verify Parlay tickets\n- Mark Problem Account\n\n**Parlay-specific:**\n- Show Refno (combo ticket)\n- Show multiple matches per ticket] as WebPage #CE93D8
+}
+
+' ============================================
+' DATA FLOW - PHASE 1: GET TICKETS
+' ============================================
+BetTrans --> BetTransM : **JOIN**\nON Refno
+note on link
+    **Phase 1: Get Tickets**
+    Each Refno = 1 Parlay ticket
+    Multiple matches per Refno
+end note
+
+BetTransM --> Match : **JOIN**\nON MatchID
+BetTransM --> League : **JOIN**\nON LeagueID
+
+' ============================================
+' DATA FLOW - PHASE 2: INSERT STAGING
+' ============================================
+BetTransM --> StagingLive : **INSERT**\n(if LiveIndicator = 1)\n\n**ScoreDiff**\n= (LiveHomeScore * 10000)\n  + LiveAwayScore
+note on link
+    **Phase 2: Insert Staging**
+    - One record per match in parlay
+    - TransIDm = detail transaction ID
+    - TransDateToSecond for grouping
+end note
+
+BetTransM --> StagingNonLive : **INSERT**\n(if LiveIndicator = 0)
+
+' ============================================
+' DATA FLOW - PHASE 3-5: PROCESS & COMPLETE
+' ============================================
+StagingLive --> TableMatch : **INSERT/UPDATE**\nReason = 5
+note on link
+    **Phase 3-5: Process & Complete**
+    
+    1. Association Detection (4 criteria)
+    2. Group by TimeStep (180s)
+    3. Save detected groups
+end note
+
+StagingLive --> TableDetail : **INSERT/UPDATE**\nListCustID, ListTransID (Refno)
+
+StagingNonLive --> TableMatch : **INSERT/UPDATE**\nReason = 5
+StagingNonLive --> TableDetail : **INSERT/UPDATE**\nListCustID, ListTransID (Refno)
+
+' ============================================
+' DATA FLOW - WEB PAGE
+' ============================================
+TableMatch --> WebPage : **SELECT**\n(Match List)
+TableDetail --> WebPage : **SELECT**\n(Ticket Details + Refno)
+
+' ============================================
+' NOTES
+' ============================================
+note bottom of BetTrans
+    **Parlay Ticket Filters:**
+    - Betteam = 1 (Mix Parlay)
+    - BetType = 29, MatchID = 29
+    - BetCheck & 2 = 2 (Combo 2)
+      OR BetCheck & 4 = 4 (Combo 3+)
+    - Exclude internal accounts
+    - Exclude specific sites/currencies
+end note
+
+note bottom of StagingLive
+    **Key Fields:**
+    - Refno: Parlay ticket ID
+    - TransIDm: Detail transaction ID
+    - GroupID: Association group (0 = unassigned)
+    - TransDateToSecond: For time-based grouping
+end note
+
+note bottom of TableDetail
+    **ListTransID contains Refno list**
+    Each Refno represents one Parlay ticket
+    with multiple matches inside
+    
+    **Max 5-minute delay**
+    from bet placement to detection
+end note
+
+@enduml
+

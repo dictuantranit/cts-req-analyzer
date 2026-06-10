@@ -1,0 +1,52 @@
+@startuml RealtimeClassificationBySport_SP_Preprocess_Detailed
+!theme plain
+title Realtime Classification By Sport - SP Preprocess Detailed Flow
+
+start
+:CTS_BySportNormalClassification_RealTime_Preprocess;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Tables: CustomerClassification_BySport_Priority, Normal Pool
+    Parameter: @CustomersXML (XML)
+end note
+
+:Create Temp Table;
+note right
+    #tmpCustomers:
+    - CustId (INT)
+    - SportGroup (INT)
+    - PRIMARY KEY (CustId, SportGroup)
+end note
+
+:Parse XML Customer List;
+note right
+    INSERT INTO #tmpCustomers
+    SELECT
+      T.C.value('./@CustId', 'INT') AS CustId
+      , T.C.value('./@SportGroup', 'SMALLINT') AS SportGroup
+    FROM @CustomersXML.nodes('//r') AS T(C)
+end note
+
+:Get Priority;
+note right
+    SELECT ISNULL(p.[Priority], 9999)
+    FROM CustomerClassification_BySport_Priority AS p
+    WHERE p.GroupId = 1
+      AND p.FunctionId = 1
+      (RealtimeJob)
+    @Priority
+end note
+
+:Insert into Normal Pool;
+note right
+    EXEC CTS_BySportNormalClassification_NormalPool_Insert
+    @FunctionId = 1
+    @Priority = @Priority
+    Insert customers into Normal Pool
+    for later classification processing
+end note
+
+stop
+
+@enduml
+

@@ -1,0 +1,51 @@
+@startuml DangerMonitor_Sequence_NoAssociation
+!theme plain
+title Danger Monitor Search - No Association Mode Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+User -> Controller: POST GetDangerMonitor(filter)
+activate Controller
+
+Controller -> Controller: Validate filter
+alt filter.Validate == true AND IsRootUserAssociationMode == false
+    Controller -> Service: GetDangerMonitorWithNoAssociation(filter)
+    activate Service
+    
+    Service -> Service: GetDangerMonitorInfoWithNoAssociation(filter)
+    Service -> Service: Create DangerMonitorSearchMatchInfoCriteria
+    note right of Service: Set parameters:\n- FromDate, ToDate\n- SportList, BettypeList\n- DangerLevels\n- UserNameList, etc.
+    
+    Service -> Repository: Fetch<DangerMMTicketInfoEntity>(criteria)
+    activate Repository
+    
+    Repository -> Repository: GetSettingKey() = "CTS_MatchTicketInfo_Get"
+    Repository -> DB: EXEC CTS_MatchTicketInfo_Get [SP]
+    activate DB
+    note right of DB: Stored Procedure:\nCTS_MatchTicketInfo_Get\n@FromDate, @ToDate\n@SportList, @BettypeList\n@DangerLevels, etc.
+    DB --> Repository: Return ResultSet
+    deactivate DB
+    
+    Repository --> Service: IEnumerable<DangerMMTicketInfoEntity>
+    deactivate Repository
+    
+    Service -> Service: Map to DangerMMTicketInfoModel
+    Service -> Service: MappingDangerMonitorWithSportBettype()
+    Service -> Service: Join with SportBettype data
+    Service --> Controller: GetDangerMonitorResultViewModel
+    deactivate Service
+    
+    Controller -> Controller: OrderDangerMonitorItems()
+    note right of Controller: Order by:\n1. MatchSection\n2. EventDate DESC\n3. MatchID DESC\n4. BettypeID\n5. BetID
+    Controller --> User: JSON Response { data: { Items: [...] } }
+else filter.Validate == false
+    Controller --> User: JSON Response { data: { Items: [] } }
+end
+deactivate Controller
+
+@enduml
+

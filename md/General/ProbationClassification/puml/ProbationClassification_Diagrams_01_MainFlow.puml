@@ -1,0 +1,163 @@
+@startuml ProbationClassification_MainFlow
+title Probation Classification - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam titleFontSize 16
+skinparam titleFontStyle bold
+
+|JobService|
+start
+:POST /api/classificationJobs/scanningProbationClassification;
+note right
+  Batch size parameter
+  Ex: batchSize = 5000
+end note
+
+:Execute(batchSize);
+:Validate batchSize > 0;
+
+if (Valid?) then (yes)
+  :JobRun(batchSize);
+else (no)
+  :Log Error - Invalid Batch Size;
+  stop
+endif
+
+|Do-While Loop|
+note right
+  **Pagination Loop**:
+  Continue until all probation customers processed
+  Uses system parameters for progress tracking
+end note
+
+repeat
+  |Service Layer|
+  :Start();
+  note right
+    Initialize ProbationModel
+  end note
+
+  :GetProbationCustForScanning(batchSize);
+  note right
+    **Get Probation Customers**:
+    - FROM CTSCustomerClassification
+    - WHERE ProbationEndDate > NOW()
+    - AND CustID > LastCustID (pagination)
+    - ORDER BY CustID, CategoryID
+    - LIMIT batchSize
+    
+    **System Parameters Used**:
+    - DailyProbation_LastCustID (start point)
+    - DailyProbation_LastCategoryID
+    
+    **Returns**:
+    - ProbationEntity[] (CustId, SportGroupId)
+    - LastCustID (output parameter)
+    - LastCategoryID (output parameter)
+  end note
+
+  if (Has probation customers?) then (yes)
+    :ClassifyProbation();
+    note right
+      **Re-Classify Probation Customers**:
+      1. Convert CustIDs to comma-separated string
+      2. Call SP: CTS_GeneralNormalClassification_Probation_Preprocess
+      
+      **Re-Classification Logic**:
+      - Get performance during probation
+      - Calculate new metrics:
+        * Turnover during probation
+        * Winloss during probation
+        * BetCount during probation
+        * ActiveDays during probation
+      - Determine category change:
+        * PA → PotentialPA (improved)
+        * PA → Normal (significantly improved)
+        * PotentialPA → PA (deteriorated)
+        * PotentialPA → Normal (improved)
+        * No change (maintain current)
+      - Update CTSCustomerClassification
+      - Complete probation if end date reached
+      - Extend probation if still PA/PotentialPA
+    end note
+  else (no)
+    note right
+      **No probation customers**:
+      All customers processed
+      or no customers in probation
+    end note
+  endif
+
+  :UpdateLastScanDate();
+  note right
+    **Update System Parameters**:
+    1. Update DailyProbation_LastCustID
+       - Set to LastCustID from SP output
+    2. Update DailyProbation_LastCategoryID
+       - Set to LastCategoryID from SP output
+    
+    **Return isContinue**:
+    - true: CustProbations has data (more to process)
+    - false: CustProbations is empty (all done)
+    
+    **Pagination Logic**:
+    Next iteration starts from:
+    - CustID > LastCustID
+    - CategoryID > LastCategoryID (secondary key)
+  end note
+
+  :Set isContinue flag;
+
+repeat while (isContinue = true?) is (yes)
+-> no;
+
+|JobService|
+:Complete;
+note right
+  **Job Completion**:
+  All probation customers processed
+  System parameters updated to latest position
+  Ready for next job run
+end note
+
+note right
+  **Key Characteristics**:
+  
+  1. **Do-While Loop** (not recursive):
+     - Simple loop structure
+     - Continues until all probation customers processed
+     - No recursive calls
+  
+  2. **Pagination with System Parameters**:
+     - LastCustID and LastCategoryID persisted
+     - Survives job restarts
+     - Enables resumable processing
+     - No risk of re-processing
+  
+  3. **Simple Processing**:
+     - No batch chunking (processes all at once)
+     - No parallel processing
+     - Straightforward sequential flow
+  
+  4. **No External Push**:
+     - Classification changes internal only
+     - No push to MainDB
+     - No external API calls
+  
+  5. **Probation Review**:
+     - Re-classifies customers in probation
+     - Based on performance during probation
+     - Can upgrade, downgrade, or maintain category
+  
+  **Comparison with DailyProblemClassification**:
+  - DailyProblem: Recursive, queue-based, with external push
+  - Probation: Do-while, parameter-based, internal only
+end note
+
+stop
+
+@enduml
+

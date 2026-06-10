@@ -1,0 +1,162 @@
+@startuml NormalAccountClassificationBySport_Sequence
+!theme plain
+title Normal Account Classification By Sport - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationBySportJob\nController" as Controller
+participant "NormalAccountClassificationBySport\nJobService" as JobService
+participant "NormalAccountClassificationBySport\nService" as Service
+participant "NormalAccountClassificationBySport\nDataAccess" as DataAccess
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "MySQL\nCTS_DataCenter" as DB
+
+Scheduler -> Controller: POST /api/classificationBySportJobs/NormalAccountClassificationBySport\nbatchInternalSize
+activate Controller
+
+Controller -> JobService: Execute(batchInternalSize)
+activate JobService
+
+JobService -> Service: GetNormalPoolCustomers()
+activate Service
+
+Service -> DataAccess: GetNormalPoolCustomers()
+activate DataAccess
+
+DataAccess -> DataAccess: Create GetNormalPoolCustomerBySportCriteria
+DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_NormalPool_Get\n@ScannedMaxId OUTPUT
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Get ScannedMaxId (MAX ID from NormalPool)
+    - Get LastScannedRow from Parameter
+    - Get TOP 20000 customers
+    - Filter by ID <= ScannedMaxId
+    - Filter by RowVersion check
+    - Return: CustId, SportGroup, IsCheckBetCount
+end note
+VR2DB --> DataAccess: ResultSet: GetNormalPoolCustomerBySportEntity[]\nScannedMaxId
+deactivate VR2DB
+
+DataAccess --> Service: GetNormalPoolCustomerBySportModel
+deactivate DataAccess
+
+Service --> JobService: GetNormalPoolCustomerBySportModel
+deactivate Service
+
+alt Has Customers
+    JobService -> JobService: Chunk customers by batchInternalSize
+    
+    par Parallel Processing (5 threads)
+        loop For each chunk
+            JobService -> JobService: Serialize customers to JSON
+            note right of JobService
+                Create custSportList JSON
+                from NormalPoolCustomers
+            end note
+            
+            JobService -> Service: GetCurrentCustomerCategory(custSportList)
+            activate Service
+            
+            Service -> DataAccess: GetCurrentCustomerCategory(custSportList)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Create GetCurrentNormalCategoryBySportCriteria
+            DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_GetCurrentCategory\n@ip_CustSport (JSON)
+            activate DB
+            note right of DB
+                Stored Procedure:
+                - Parse JSON customer list
+                - Validate customers
+                - Get latest normal category
+                - Check Probation LastDay
+                Returns: CustID, SportGroup, CategoryID, IsProbationLastDay
+            end note
+            DB --> DataAccess: ResultSet: GetCurrentNormalCategoryBySportEntity[]
+            deactivate DB
+            
+            DataAccess --> Service: IEnumerable<GetCurrentNormalCategoryBySportEntity>
+            deactivate DataAccess
+            
+            Service --> JobService: IEnumerable<GetCurrentNormalCategoryBySportEntity>
+            deactivate Service
+            
+            JobService -> JobService: Join NormalPoolCustomers with CustomerCategories
+            note right of JobService
+                Join on CustID and SportGroup
+                Create GetCurrentCustomerCategoryBySportModel
+            end note
+            
+            JobService -> JobService: Convert to XML
+            note right of JobService
+                Serialize customerInfos
+                to XML format
+            end note
+            
+            JobService -> Service: ClassifyNormalPoolCustomers(customersXML)
+            activate Service
+            
+            Service -> DataAccess: ClassifyNormalPoolCustomers(customersXML)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Create ClassifyNormalPoolCustomerBySportCriteria
+            DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_NormalPool_Classify\n@CustomersXML
+            activate VR2DB
+            note right of VR2DB
+                Stored Procedure:
+                - Parse XML customer list
+                - Get accumulated performance
+                - Calculate classification
+                - Update/Insert results
+            end note
+            VR2DB --> DataAccess: Success
+            deactivate VR2DB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+            
+            Service --> JobService: this
+            deactivate Service
+            
+            JobService -> JobService: Convert customerInfoClears to XML
+            note right of JobService
+                Serialize customerInfoClears
+                to XML format
+            end note
+            
+            JobService -> Service: ClearNormalPoolCustomers(customersXML, scannedMaxId)
+            activate Service
+            
+            Service -> DataAccess: ClearNormalPoolCustomers(customersXML, scannedMaxId)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Create ClearNormalPoolCustomerBySportCriteria
+            DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_NormalPool_Clear\n@CustomersXML, @ScannedMaxId
+            activate VR2DB
+            note right of VR2DB
+                Stored Procedure:
+                - Parse XML customer list
+                - Delete from NormalPool
+                - WHERE ID <= ScannedMaxId
+            end note
+            VR2DB --> DataAccess: Success
+            deactivate VR2DB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+            
+            Service --> JobService: this
+            deactivate Service
+        end
+    end
+    
+    JobService --> Controller: Task<bool> (true)
+else No Customers
+    JobService --> Controller: Task<bool> (false)
+end
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true/false }
+deactivate Controller
+
+@enduml
+

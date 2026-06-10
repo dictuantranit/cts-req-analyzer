@@ -1,0 +1,71 @@
+@startuml DailyProblemClassificationBySport_SP_GetFromQueue_Detailed
+!theme plain
+title Daily Problem Classification By Sport - SP GetFromQueue Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_DailyScanPA_GetFromQueue;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Tables: SystemParameter, CTSCustomerClassification_BySport_DailyPAQueue
+    CTSCustomerClassification_BySport, CustomerCategorySettings
+    Parameter: @ip_BatchSize
+end note
+
+:Get LastScannedTime from SystemParameter;
+note right
+    SELECT ParameterValue
+    WHERE ParameterID = 200
+end note
+
+:Add 24 Hours to LastScannedTime;
+note right
+    LastScannedTime = LastScannedTime + 24 hours
+    This ensures we only process customers
+    that have been in queue for at least 24 hours
+end note
+
+:Create Temp Table;
+note right
+    Temp_Customers:
+    - CustID (BIGINT UNSIGNED)
+    - SportGroup (INT)
+    - PRIMARY KEY (CustID, SportGroup)
+end note
+
+:Get Customers from DailyPAQueue;
+note right
+    SELECT ccdpa.ID, cc.CustID, ccdpa.SportGroup
+    FROM DailyPAQueue AS ccdpa
+    JOIN CCBySport ON cc.CustID = ccdpa.CustID
+      AND cc.SportID = ccdpa.SportGroup
+    JOIN CategorySettings ON cc.CategoryID = ccs.CategoryID
+    WHERE ccdpa.CreatedTime <= @LastScannedTime
+      AND ccs.FlowPADailyScan = 1
+    ORDER BY ID ASC
+    LIMIT @ip_BatchSize
+end note
+
+:Filter by FlowPADailyScan;
+note right
+    Filter: FlowPADailyScan = 1
+    Only process categories that are
+    configured for daily PA scan
+end note
+
+:Insert into Temp Table;
+note right
+    INSERT INTO Temp_Customers
+    SELECT DISTINCT CustID, SportGroup
+    FROM CTE
+end note
+
+:Return Results;
+note right
+    SELECT CustID, SportGroup
+    FROM Temp_Customers
+end note
+
+stop
+
+@enduml
+

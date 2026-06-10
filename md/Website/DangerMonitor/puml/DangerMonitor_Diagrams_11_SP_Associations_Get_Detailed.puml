@@ -1,0 +1,221 @@
+@startuml DangerMonitor_SP_Associations_Get_Detailed
+!theme plain
+title CTS_MatchTicketInfo_Associations_Get - Detailed Database Flow
+
+skinparam component {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+skinparam arrow {
+    Color darkgreen
+}
+
+package "SQL Server Database: bodb02 / WASAVerse" {
+    database "bettrans" as BetTrans
+    database "bettrans14" as BetTrans14
+    database "Match" as Match
+    database "match14" as Match14
+    database "league" as League
+    database "team" as Team
+}
+
+component "CTS_MatchTicketInfo_Associations_Get" as SP {
+    note right
+        **Database:** bodb02/WASAVerse
+        **Purpose:** Get Match Ticket Info with Associations
+        **Key Feature:** Group by RootCustID (Association Groups)
+        **Data Source Logic:**
+        - FromDate > MoveBetsDay → Use bettrans (Origin)
+        - FromDate <= MoveBetsDay → Use bettrans14 (14 days)
+        - Can use both (Union)
+    end note
+}
+
+' Temp Tables
+package "Temp Tables (Internal)" {
+    component "#tmpAssoc" as TmpAssoc
+    component "#tmpBetType" as TmpBetType
+    component "#tmpCustomer" as TmpCustomer
+    component "#tmpLeagueGroup" as TmpLeagueGroup
+    component "#tmpMatchInfo" as TmpMatchInfo
+    component "#tmpMatchInfo14" as TmpMatchInfo14
+    component "#tmpCustTrans" as TmpCustTrans
+    component "#tmpMatchSum_Group" as TmpMatchSumGroup
+    component "@tmpBUMBData" as TmpBUMBData
+    component "@tmpSport" as TmpSport
+    component "@tmpMatchSection" as TmpMatchSection
+    component "@tmpSportSabaLeagueGroup" as TmpSportSabaLeagueGroup
+}
+
+note right of TmpAssoc
+    **Temp Table: #tmpAssoc**
+    * CustID : INT
+    * RootCustID : INT
+    **Purpose:** Map Association Customers to Root Customer
+end note
+
+note right of TmpMatchSumGroup
+    **Temp Table: #tmpMatchSum_Group**
+    * RootCustID : INT
+    * MatchId : INT
+    * LiveIndicator : BIT
+    * Bettype : INT
+    * BetId : BIGINT
+    * BetChoiceType : TINYINT
+    * TotalAmountHome : MONEY
+    * TotalAmountAway : MONEY
+    * TotalTicketHome : MONEY
+    * TotalTicketAway : MONEY
+    * ListCustID : VARCHAR(MAX)
+    * IsFrom14 : BIT
+end note
+
+' Flow: Parse Input Parameters
+SP --> TmpBUMBData : **EXEC**\nAge_SelBalanceUpDay
+SP --> TmpBUMBData : **SELECT**\nGet BalanceUpDay, MoveBetsDay
+
+SP --> TmpSport : **INSERT**\n(Parse @SportList)
+SP --> TmpLeagueGroup : **INSERT**\n(Parse @LeagueGroupList)
+
+SP --> TmpAssoc : **INSERT**\n(Parse @AssociationsList JSON)
+note right of SP
+    **AssociationsList Format:**
+    [{"RootCustID": 1, "AssCustIDList": "11,12,13"},
+     {"RootCustID": 2, "AssCustIDList": "21,22,23"}]
+end note
+
+SP --> TmpAssoc : **INSERT**\n(Add RootCustID as CustID)
+
+SP --> TmpBetType : **INSERT**\n(Parse @BettypeList JSON)
+SP --> TmpMatchSection : **INSERT**\n(Parse @MatchSection)
+SP --> TmpSportSabaLeagueGroup : **INSERT**\n(Parse @SportSabaLeagueGroup)
+
+SP --> TmpCustomer : **INSERT**\n(Get DISTINCT CustID from #tmpAssoc)
+
+' Flow: Determine Data Source
+SP --> SP : Check FromDate/ToDate vs\nBalanceUpDay/MoveBetsDay
+note right of SP
+    **Data Source Logic:**
+    - ToDate > MoveBetsDay AND FromDate <= MoveBetsDay
+      → Use both bettrans (Origin) and bettrans14
+    - FromDate <= MoveBetsDay
+      → Use bettrans14 (14 days)
+    - Otherwise → Use bettrans (Origin)
+end note
+
+' Flow: Get Match Info (Origin)
+SP --> TmpMatchInfo : **INSERT**\n(From Match table)
+Match --> League : **JOIN**\nON LeagueId
+Match --> Team : **JOIN**\nON HomeId, AwayId
+TmpLeagueGroup --> League : **JOIN**\nON LeagueGroupID
+TmpSport --> Match : **JOIN**\nON SportType
+TmpMatchSection --> Match : **JOIN**\nON EventStatus
+
+note right of Match
+    **SELECT Operations (Match Info):**
+    - Filter by @FromDate, @ToDate
+    - Filter by @SportList
+    - Filter by @LeagueGroupList
+    - Filter by @MatchSection (Live, Today, Early, Closed)
+    - Filter by @LeagueEvent (search)
+    - Exclude Test matches
+    - Exclude Saba LeagueGroups (42,74,108,113,122,151)
+      OR Include if in @SportSabaLeagueGroup
+end note
+
+' Flow: Get Match Info (14 days)
+SP --> TmpMatchInfo14 : **INSERT**\n(From Match14 table)
+Match14 --> League : **JOIN**\nON LeagueId
+Match14 --> Team : **JOIN**\nON HomeId, AwayId
+TmpLeagueGroup --> League : **JOIN**\nON LeagueGroupID
+TmpSport --> Match14 : **JOIN**\nON SportType
+TmpMatchSection --> Match14 : **JOIN**\nON EventStatus
+
+' Flow: Get Bet Transactions (Origin)
+SP --> TmpMatchSumGroup : **INSERT**\n(From bettrans)
+BetTrans --> TmpCustomer : **JOIN**\nON CustID
+BetTrans --> TmpMatchInfo : **JOIN**\nON MatchId
+TmpBetType --> BetTrans : **CROSS APPLY**\nON BetType, BetID
+
+note right of BetTrans
+    **SELECT Operations (bettrans):**
+    - Filter by CustID in #tmpCustomer
+    - Filter by MatchId in #tmpMatchInfo
+    - Filter by BetType, BetID from #tmpBetType
+    - Calculate Stake * Actualrate
+    - Separate Home/Away by BetChoiceType
+    - WITH(NOLOCK)
+end note
+
+' Flow: Get Bet Transactions (14 days)
+SP --> TmpCustTrans : **INSERT**\n(From bettrans14)
+BetTrans14 --> TmpCustomer : **JOIN**\nON CustID
+BetTrans14 --> TmpMatchInfo14 : **JOIN**\nON MatchId
+
+SP --> TmpMatchSumGroup : **INSERT**\n(From #tmpCustTrans)
+TmpCustTrans --> TmpBetType : **CROSS APPLY**\nON BetType, BetID
+
+' Flow: Aggregate by Association Group
+TmpAssoc --> TmpMatchSumGroup : **JOIN**\nON CustID
+SP --> TmpMatchSumGroup : **GROUP BY**\nRootCustID, MatchId, Bettype, BetID
+
+note right of SP
+    **Aggregation Logic:**
+    - GROUP BY: RootCustID, MatchId, BetChoiceType, Bettype, LiveIndicator, BetId
+    - SUM: TotalAmountHome, TotalAmountAway
+    - SUM: TotalTicketHome, TotalTicketAway
+    - STRING_AGG: ListCustID (comma-separated)
+    - Filter by @UserAmount (per customer)
+    - Filter by @TotalAmount (per group)
+    - HAVING: Must have Root Customer AND Association Customers
+end note
+
+' Flow: Filter by Amounts
+SP --> TmpMatchSumGroup : **HAVING**\n(Filter by @TotalAmount)
+note right of SP
+    **Filter Conditions:**
+    - CustAmountHome >= @UserAmount OR CustAmountAway >= @UserAmount
+    - SUM(CustAmountHome) >= @TotalAmount OR SUM(CustAmountAway) >= @TotalAmount
+    - Must have Root Customer (CustID = RootCustID)
+    - Must have Association Customers (CustID <> RootCustID)
+end note
+
+' Flow: Return Results
+SP --> TmpMatchSumGroup : **SELECT**
+TmpMatchSumGroup --> TmpMatchInfo : **JOIN**\nON MatchId (IsFrom14 = 0)
+TmpMatchSumGroup --> TmpMatchInfo14 : **JOIN**\nON MatchId (IsFrom14 = 1)
+TmpMatchSection --> SP : **CROSS APPLY**\n(Calculate MatchSection)
+
+note right of SP
+    **Returns:**
+    - RootCustID
+    - MatchId, LeagueId, LeagueName
+    - EventDate, GlobalShowTime
+    - MatchSection (Live, Today, Early, Closed)
+    - SportType, HomeId, HomeName, AwayId, AwayName
+    - LiveIndicator, Bettype, BetID, BetChoiceType
+    - TotalAmountHome, TotalAmountAway
+    - TotalTicketHome, TotalTicketAway
+    - IsFrom14, ListCustID
+    **Return Logic:**
+    - @IsFromActive14 = 1 → Only Origin (bettrans)
+    - @IsFromActive14 = 2 → Only 14 days (bettrans14)
+    - @IsFromActive14 = 3 → UNION ALL (both)
+end note
+
+' Cleanup
+SP --> TmpBetType : **DROP TABLE**
+SP --> TmpCustomer : **DROP TABLE**
+SP --> TmpMatchSumGroup : **DROP TABLE**
+SP --> TmpMatchInfo : **DROP TABLE**
+SP --> TmpMatchInfo14 : **DROP TABLE**
+SP --> TmpCustTrans : **DROP TABLE**
+
+@enduml
+

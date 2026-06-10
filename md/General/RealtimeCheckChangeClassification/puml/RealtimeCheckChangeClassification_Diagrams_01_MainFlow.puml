@@ -1,0 +1,107 @@
+@startuml RealtimeCheckChangeClassification_MainFlow
+!theme plain
+title Realtime Check Change Classification - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationJobs/realtimeCheckChanges
+    Parameter: batchSize (int)
+end note
+
+:RealtimeCheckChangeClassificationJobService.Execute(batchSize);
+
+:CheckChange();
+  :Call CTS_NormalClassification_RealTime_CheckChanges [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Timeout: 300-600 seconds
+      
+      Output Parameters:
+      - @NextScannedDateTime1
+      - @NextScannedDateTime2
+      - @NextScannedDateTime3
+      - @NextScannedDateTime4
+      
+      Returns 2 ResultSets:
+      - ResultSet 1: CustInfos (Member customers)
+        * CustId
+        * LastTicketDate
+      - ResultSet 2: CustInfosAgency (Agency customers)
+        * CustId
+        * LastTicketDate
+  end note
+
+partition "Update Member LastTransDate" {
+  if (Has Member Customers?) then (yes)
+    :Chunk CustInfos by batchSize;
+    
+    repeat :For each batch
+      :Serialize batch to JSON;
+      :Call CTS_Arc_CustomerAssociation_LastTicketDate_Update [SP];
+      note right
+          Database: CTS_Archive (MySQL)
+          Parameters:
+          - @ip_CustInfo (JSON)
+          
+          Logic:
+          - Parse JSON array
+          - Update CustomerAssociation.LastTicketDate
+          - Track customer betting history
+      end note
+      :Thread.Sleep(10ms);
+      note right
+          Throttling to prevent
+          database overload
+      end note
+    repeat while (More batches?)
+  else (no)
+    note right
+      No Member customers to update
+    end note
+  endif
+}
+
+partition "Update Agency LastTransDate" {
+  if (Has Agency Customers?) then (yes)
+    :Chunk CustInfosAgency by batchSize;
+    
+    repeat :For each batch
+      :Serialize batch to JSON;
+      :Call CTS_Arc_CustomerAssociation_LastTicketDate_Update [SP];
+      note right
+          Same SP as Member update
+          but for Agency customers
+      end note
+      :Thread.Sleep(10ms);
+    repeat while (More batches?)
+  else (no)
+    note right
+      No Agency customers to update
+    end note
+  endif
+}
+
+:UpdateNextScanCheckChange();
+  :Call CTS_NormalClassification_RealTime_UpdateNextScannedTime [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Parameters:
+      - @NextScannedDateTime1
+      - @NextScannedDateTime2
+      - @NextScannedDateTime3
+      - @NextScannedDateTime4
+      
+      Logic:
+      - Save 4 time slots for next scan
+      - Optimization strategy:
+        * Sliding window scanning
+        * Parallel time slot processing
+        * Load balancing
+  end note
+
+:Return Success;
+stop
+
+@enduml
+

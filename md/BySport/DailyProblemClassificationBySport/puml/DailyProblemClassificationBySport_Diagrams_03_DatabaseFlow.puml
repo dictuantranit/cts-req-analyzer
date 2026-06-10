@@ -1,0 +1,121 @@
+@startuml DailyProblemClassificationBySport_DatabaseFlow
+!theme plain
+title Daily Problem Classification By Sport - Database Flow Diagram
+
+start
+:Job Request Received;
+
+if (Action Type?) then (GetDailyPAFromQueue)
+    :Create PADailyScanFromQueueBySportGetCriteria;
+    note right
+        Parameters:
+        - @ip_BatchSize
+    end note
+    :Execute CTS_DC_CustClassification_BySport_DailyScanPA_GetFromQueue;
+    :Process Results;
+    note right
+        Logic:
+        - Get LastScannedTime from SystemParameter (ID=200)
+        - Add 24 hours
+        - Get from DailyPAQueue
+        - Filter by FlowPADailyScan = 1
+        - Order by ID ASC, Limit batchSize
+        Returns:
+        - CustID, SportGroup
+    end note
+    :Return ProblemAccountInfoFromDailyQueueModel[];
+    
+elseif (GetPALosingBySport) then
+    :Create ProblemAccountClassificationBySportGetCriteria;
+    note right
+        Parameters:
+        - @ListCustInfo (JSON array)
+        - @FunctionId (12 = ProblemDailyJob)
+    end note
+    :Execute CTS_ProblemAccountsClassification_BySport_Daily [VR2 DB];
+    :Process Losing Performance Data;
+    note right
+        Logic:
+        - Parse JSON customer list
+        - Get accumulated data from bodb_dwrs
+        - Calculate WinlossStatus:
+          * LOSING (0): WinlossRM < -10000
+          * KEEPSTATE (1): -10000 <= WinlossRM < -5000
+          * WINNING (2): WinlossRM >= -5000
+        Returns:
+        - CustID, SportGroup
+        - WinlossStatus, TurnoverRM, WinlossRM
+        - BetCount, ActiveDays
+    end note
+    :Return ProblemAccountLosingBySportEntity[];
+    
+elseif (InsertPAWLPerformanceBySport) then
+    :Create ProblemAccountProbationBySportInsertCriteria;
+    note right
+        Parameters:
+        - @ip_ProblemAccount (JSON array)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_DailyScanPA_Insert;
+    note right
+        Logic:
+        - Parse JSON with WinlossStatus, TurnoverRM, etc.
+        - Get current classification from CTSCustomerClassification_BySport
+        - Determine IsDataChanged:
+          * LOSING + PA: Update (IsDataChanged = 1)
+          * LOSING + Probation: No Change (IsDataChanged = 0)
+          * WINNING + PA: No Change (IsDataChanged = 0)
+          * WINNING + Probation: Update (IsDataChanged = 1)
+        - Update classification if IsDataChanged = 1
+        - Insert into History and Log tables
+    end note
+    :Process Insertion Results;
+    :Return InsertPAProbationBySportResultModel[];
+    
+elseif (PushCCBySportToMainDB) then
+    :Get Customer Classification By Sport;
+    note right
+        Query:
+        SELECT CustID, SportID, CustomerClass
+        FROM CustomerClassification_BySport
+        WHERE (CustID, SportID) IN (...)
+    end note
+    :Create CustomerClassificationUpdateBySportToMainDBEntity[];
+    :Execute UpdateCustomerClassificationBySport [MainDB SP];
+    note right
+        Parameters:
+        - @CustClassification (JSON)
+        Returns:
+        - ErrorCode
+        - ErrorMsg
+    end note
+    :Process Update Results;
+    :Return Success/Failure;
+    
+elseif (CompletePADailyFromQueue) then
+    :Create PADailyScanFromQueueBySportCompleteCriteria;
+    note right
+        Parameters:
+        - @ip_CustInfoList (JSON array)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_DailyScanPA_Complete;
+    :Update DailyPAQueue;
+    note right
+        Logic:
+        - Parse JSON customer list
+        - Get LastScannedTime from SystemParameter (ID=200)
+        - Add 24 hours
+        - Delete processed customers from DailyPAQueue
+        - If no customers: Update SystemParameter with new LastScannedTime
+    end note
+    :Return Success;
+    
+else (Other Actions)
+    :Handle Other Requests;
+endif
+
+:Map to Entities/Models;
+:Return to Service Layer;
+stop
+
+@enduml
+

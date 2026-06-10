@@ -1,0 +1,148 @@
+@startuml DailyProblemClassification_SP_GetFromQueue
+title CTS_DC_CustClassification_DailyScanPA_GetFromQueue - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E8F5E9
+skinparam activityBorderColor #4CAF50
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_CustClassification_DailyScanPA_GetFromQueue
+  **Database**: CTS_DataCenter.ctsService (MySQL)
+  **Timeout**: 300 seconds (default)
+  **Parameters**: None
+  **Called From**: PADailyScanFromQueueGetCriteria
+end note
+
+:SELECT from CTSCustomerClassification_DailyPAQueue;
+note right
+  **Table**: CTSCustomerClassification_DailyPAQueue
+  **Purpose**: Queue for PA customers to be processed daily
+  
+  **Queue Characteristics**:
+  - FIFO (First In, First Out)
+  - Populated by RealtimeClassification
+  - Temporary storage for PA customers
+  - Processed and then deleted
+  
+  **Queue Source**:
+  - When RealtimeClassification identifies PA/PotentialPA
+  - Customers with RelevantCategoryID IS NOT NULL
+  - Inserted with current timestamp
+end note
+
+:Apply FIFO Logic;
+note right
+  **ORDER BY**: InsertedTime ASC
+  - Get oldest customers first
+  - Ensures fair processing order
+  - Prevents customer starvation
+end note
+
+:Apply Batch Limit;
+note right
+  **LIMIT**: TOP 10000 (or configurable)
+  - Prevent overwhelming system
+  - Balance batch size vs throughput
+  - Memory-efficient processing
+  
+  **Batch Size Considerations**:
+  - Too large: Memory issues
+  - Too small: Too many DB calls
+  - Optimal: 5000-10000
+end note
+
+partition "Build Result Set" {
+  :Get CustID;
+  note right
+    **CustID**: long
+    - Primary customer identifier
+    - Used for all subsequent operations
+    - Foreign key to customer master
+  end note
+
+  :Get DWSportType;
+  note right
+    **DWSportType**: int (Sport Group)
+    - Sport classification
+    - Used for sport-specific logic
+    - Affects PA calculation
+    
+    **Sport Types**:
+    - 1: Soccer
+    - 2: Basketball
+    - 3: Other sports
+    - etc.
+  end note
+}
+
+:Return PADailyScanFromQueueEntity[];
+note right
+  **Return Type**: List<PADailyScanFromQueueEntity>
+  
+  **Entity Structure**:
+  - CustID (long)
+  - DWSportType (int)
+  
+  **Usage**:
+  - Input to PA classification calculation
+  - Identifies customers to process
+  - Used in UpdateComplete to mark processed
+end note
+
+:Log Query Execution;
+note right
+  **Logging**:
+  - Record count returned
+  - Query execution time
+  - Any errors/warnings
+end note
+
+if (Result set empty?) then (yes)
+  :Return empty list;
+  note right
+    **No customers in queue**:
+    - Normal during low traffic
+    - Queue fully processed
+    - No PA customers detected recently
+  end note
+else (no)
+  :Return customer list;
+  note right
+    **Customers ready for PA classification**:
+    - Will be processed in batches
+    - Calculate PA losing performance
+    - Insert PA probation classification
+  end note
+endif
+
+:Complete;
+stop
+
+note bottom
+  **Queue Management**:
+  1. **Producer**: RealtimeClassification inserts PA customers
+  2. **Consumer**: DailyProblemClassification processes queue
+  3. **Cleanup**: UpdateComplete deletes processed customers
+  
+  **Queue Flow**:
+  RealtimeClassification → DailyPAQueue → DailyProblemClassification → Delete from Queue
+  
+  **Performance**:
+  - Indexed on InsertedTime for FIFO
+  - Indexed on CustID for deletion
+  - Regular cleanup prevents growth
+  
+  **Error Handling**:
+  - Failed processing: Customer remains in queue
+  - Retry on next job run
+  - Alert if queue grows too large
+end note
+
+@enduml
+

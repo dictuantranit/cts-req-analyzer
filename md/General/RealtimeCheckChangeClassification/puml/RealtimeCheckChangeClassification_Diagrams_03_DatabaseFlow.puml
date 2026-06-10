@@ -1,0 +1,121 @@
+@startuml RealtimeCheckChangeClassification_DatabaseFlow
+!theme plain
+title Realtime Check Change Classification - Database Flow
+
+start
+
+partition "Step 1: CheckChange" {
+  :Call SP: CTS_NormalClassification_RealTime_CheckChanges;
+  note right
+      **Database**: bodb_VR2Model (SQL Server)
+      **Timeout**: 300-600 seconds
+      
+      **Output Parameters**:
+      - @NextScannedDateTime1 (DateTime, OUTPUT)
+      - @NextScannedDateTime2 (DateTime, OUTPUT)
+      - @NextScannedDateTime3 (DateTime, OUTPUT)
+      - @NextScannedDateTime4 (DateTime, OUTPUT)
+  end note
+  
+  :Return 2 ResultSets;
+  note right
+      **ResultSet 1: CustInfos (Member)**
+      - CustId (int)
+      - LastTicketDate (DateTime)
+      
+      **ResultSet 2: CustInfosAgency (Agency)**
+      - CustId (int)
+      - LastTicketDate (DateTime)
+  end note
+  
+  :Extract NextScannedDateTime1-4;
+}
+
+partition "Step 2: Update Member LastTransDate" {
+  if (Has Member Customers?) then (yes)
+    :Chunk CustInfos into batches;
+    
+    repeat :For each batch
+      :Serialize to JSON;
+      note right
+          JSON Format:
+          [
+            {"CustId": 123, "LastTicketDate": "2024-01-01 10:00:00"},
+            {"CustId": 456, "LastTicketDate": "2024-01-01 11:00:00"},
+            ...
+          ]
+      end note
+      
+      :Call SP: CTS_Arc_CustomerAssociation_LastTicketDate_Update;
+      note right
+          **Database**: CTS_Archive (MySQL)
+          **Parameters**:
+          - @ip_CustInfo (JSON string)
+          
+          **Logic**:
+          - Parse JSON array
+          - UPDATE CustomerAssociation
+            SET LastTicketDate = parsed.LastTicketDate
+            WHERE CustId = parsed.CustId
+      end note
+      
+      :Sleep 10ms;
+    repeat while (More batches?)
+  else (no)
+    :Skip;
+  endif
+}
+
+partition "Step 3: Update Agency LastTransDate" {
+  if (Has Agency Customers?) then (yes)
+    :Chunk CustInfosAgency into batches;
+    
+    repeat :For each batch
+      :Serialize to JSON;
+      
+      :Call SP: CTS_Arc_CustomerAssociation_LastTicketDate_Update;
+      note right
+          **Same SP as Step 2**
+          but for Agency customers
+      end note
+      
+      :Sleep 10ms;
+    repeat while (More batches?)
+  else (no)
+    :Skip;
+  endif
+}
+
+partition "Step 4: Update Next Scan Times" {
+  :Call SP: CTS_NormalClassification_RealTime_UpdateNextScannedTime;
+  note right
+      **Database**: bodb_VR2Model (SQL Server)
+      **Timeout**: 300 seconds
+      
+      **Parameters**:
+      - @NextScannedDateTime1 (DateTime)
+      - @NextScannedDateTime2 (DateTime)
+      - @NextScannedDateTime3 (DateTime)
+      - @NextScannedDateTime4 (DateTime)
+      
+      **Logic**:
+      - Update SystemParameter or similar table
+      - Save 4 time slots for next scan
+      - Enable sliding window or parallel scanning
+  end note
+}
+
+:Complete;
+note right
+  **Key Points**:
+  1. **2 Databases**: VR2 (SQL Server) + Archive (MySQL)
+  2. **Batch Processing**: Prevents database overload
+  3. **Throttling**: 10ms sleep between batches
+  4. **JSON Serialization**: Efficient batch updates
+  5. **4 Time Slots**: Advanced scheduling optimization
+end note
+
+stop
+
+@enduml
+

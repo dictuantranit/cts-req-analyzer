@@ -1,0 +1,201 @@
+@startuml RealtimeClassification_Sequence
+!theme plain
+title Realtime Classification - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationJob\nController" as Controller
+participant "RealtimeClassification\nJobService" as JobService
+participant "RealtimeClassification\nService" as Service
+participant "RealtimeClassification\nDataAccess" as DataAccess
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "MySQL\nCTS_DataCenter" as DataCenterDB
+
+Scheduler -> Controller: POST /api/classificationJobs/scanningRealtimeClassification\nbatchExternalSize, batchInternalSize
+activate Controller
+
+Controller -> JobService: Execute(batchExternalSize, batchInternalSize)
+activate JobService
+
+' Step 1: Start
+JobService -> Service: Start()
+activate Service
+Service -> Service: Initialize customers and customerCategories models
+Service --> JobService: IRealtimeClassificationService
+deactivate Service
+
+' Step 2: GetNewPlaceBetCustomers
+JobService -> Service: GetNewPlaceBetCustomers()
+activate Service
+
+Service -> DataAccess: GetNewPlaceBetCustomers()
+activate DataAccess
+
+DataAccess -> DataAccess: Create GetChangeCustomerRealtimeCriteria
+DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_RealTime_GetChanges\n@ScannedMaxId OUTPUT
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Get TOP 20000 from RealtimeChanges
+    - Order by ID ASC
+    - Return: CustId, SportId
+    - Output: ScannedMaxId (MAX ID)
+end note
+VR2DB --> DataAccess: ResultSet: GetNewPlaceBetCustomerEntity[]\nScannedMaxId
+deactivate VR2DB
+
+DataAccess -> DataAccess: Map to GetNewPlaceBetCustomerModel
+DataAccess --> Service: GetNewPlaceBetCustomerModel
+deactivate DataAccess
+
+Service --> JobService: IRealtimeClassificationService
+deactivate Service
+
+' Step 3: GetCustomerCategory
+alt Has Customers
+    JobService -> Service: GetCustomerCategory(batchInternalSize)
+    activate Service
+    
+    Service -> Service: Chunk customers by batchInternalSize
+    
+    loop For each chunk
+        Service -> Service: Join CustIds to comma-separated string
+        
+        Service -> DataAccess: GetCustomerCategory(custIdList)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create GetCustomerCategoryRealtimeCriteria\nCustIdList = "123,456,789,..."
+        DataAccess -> DataCenterDB: EXEC CTS_DC_CustClassification_Realtime_GetCategory\n@ip_CustIDs
+        activate DataCenterDB
+        note right of DataCenterDB
+            Stored Procedure:
+            - Parse customer ID list
+            - Get current classification
+            - Categorize:
+              * Normal → ResultSet 1
+              * PA/PotentialPA → ResultSet 2
+        end note
+        DataCenterDB --> DataAccess: ResultSet 1: CustomerCategory (CustId list)\nResultSet 2: CustomerPADailyScan (CustId list)
+        deactivate DataCenterDB
+        
+        DataAccess -> DataAccess: Map to GetCustomerCategoryRealtimeModel
+        DataAccess --> Service: GetCustomerCategoryRealtimeModel
+        deactivate DataAccess
+        
+        Service -> Service: Add to customerCategories collections
+    end
+    
+    Service --> JobService: IRealtimeClassificationService
+    deactivate Service
+    
+    ' Step 4: Parallel Processing
+    par Preprocess Normal Customers
+        JobService -> Service: PreprocessCustomerClassRealtime(batchInternalSize)
+        activate Service
+        
+        Service -> Service: Chunk CustomerCategory by batchInternalSize
+        
+        loop For each chunk
+            Service -> Service: Join CustIds to comma-separated string
+            
+            Service -> DataAccess: PreprocessCustomerClassRealtime(custIdList)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Create PreprocessCustomerRealtimeCriteria\nListCustId = "123,456,..."
+            DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_Realtime_Preprocess\n@ListCustId
+            activate VR2DB
+            note right of VR2DB
+                Stored Procedure:
+                - Parse customer ID list
+                - Get Priority from Priority table
+                - Call NormalPool_Insert
+                - Insert into Normal Pool
+            end note
+            VR2DB --> DataAccess: Success
+            deactivate VR2DB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+        end
+        
+        Service --> JobService: IRealtimeClassificationService
+        deactivate Service
+    else Insert PA Queue
+        JobService -> Service: InsertPADailyScanQueue(batchInternalSize)
+        activate Service
+        
+        Service -> Service: Chunk CustomerPADailyScan by batchInternalSize
+        
+        loop For each chunk
+            Service -> Service: Join CustIds to comma-separated string
+            
+            Service -> DataAccess: InsertPADailyScanQueue(custIDList)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Create InsertQueuePADailyCriteria\nCustIDList = "123,456,..."
+            DataAccess -> DataCenterDB: EXEC CTS_DC_CustClassification_DailyScanPA_InsertToQueue\n@ip_CustIDs
+            activate DataCenterDB
+            note right of DataCenterDB
+                Stored Procedure:
+                - Parse customer ID list
+                - INSERT INTO DailyPAQueue
+                - Set CreatedTime = NOW()
+            end note
+            DataCenterDB --> DataAccess: Success
+            deactivate DataCenterDB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+        end
+        
+        Service --> JobService: IRealtimeClassificationService
+        deactivate Service
+    end
+    
+    ' Step 5: Complete
+    JobService -> Service: CompleteCustomerRealtime()
+    activate Service
+    
+    Service -> DataAccess: CompleteCustomerRealtime(scannedMaxId)
+    activate DataAccess
+    
+    DataAccess -> DataAccess: Create CompleteCustomerRealtimeCriteria\nScannedMaxId
+    DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_RealTime_Complete\n@ScannedMaxId
+    activate VR2DB
+    note right of VR2DB
+        Stored Procedure:
+        - DELETE FROM RealtimeChanges
+        - WHERE ID <= @ScannedMaxId
+        - Prevent duplicate processing
+    end note
+    VR2DB --> DataAccess: Success
+    deactivate VR2DB
+    
+    DataAccess --> Service: void
+    deactivate DataAccess
+    
+    Service --> JobService: IRealtimeClassificationService
+    deactivate Service
+    
+else No Customers
+    JobService -> Service: CompleteCustomerRealtime()
+    activate Service
+    Service -> DataAccess: CompleteCustomerRealtime(0)
+    activate DataAccess
+    DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_RealTime_Complete\n@ScannedMaxId = 0
+    activate VR2DB
+    VR2DB --> DataAccess: Success (no records to delete)
+    deactivate VR2DB
+    DataAccess --> Service: void
+    deactivate DataAccess
+    Service --> JobService: IRealtimeClassificationService
+    deactivate Service
+end
+
+JobService --> Controller: Task<bool> (true)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true }
+deactivate Controller
+
+@enduml
+

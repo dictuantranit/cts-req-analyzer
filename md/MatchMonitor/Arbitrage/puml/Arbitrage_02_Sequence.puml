@@ -1,0 +1,228 @@
+@startuml Arbitrage_Sequence
+!theme plain
+title Match Monitor - Arbitrage Detection - Sequence Diagram
+
+actor "Background Job\n(Scheduler)" as Job
+participant "MatchMonitorController\n(API)" as Controller
+participant "MatchMonitorJobService\n(Service)" as JobService
+participant "MatchMonitorRuleArbitrageService\n(Business Logic)" as ArbitrageService
+participant "MatchMonitorRuleArbitrageProcessService\n(Process Logic)" as ProcessService
+participant "AssociationDetectionService\n(Association)" as AssDetect
+participant "MatchMonitorRuleArbitrageDataAccess\n(Data Access)" as DataAccess
+database "CTS MySQL\n(Staging - Pool 2004)" as Staging
+database "CTS MySQL\n(Match Monitor Tables)" as CTSDB
+
+== API Call ==
+
+Job -> Controller : POST /MatchMonitorProcessRuleArbitrageNonLive\n(numberOfThread=4)
+activate Controller
+
+Controller -> JobService : ProcessRuleArbitrage(isLive=false, numberOfThread=4)
+activate JobService
+
+== Phase 1: Get Staging Matches ==
+
+JobService -> ArbitrageService : GetMatchRuleArbitrage(isLive=false)
+activate ArbitrageService
+
+ArbitrageService -> DataAccess : GetMatchRuleArbitrage(isLive=false)
+activate DataAccess
+
+DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleArbitrage_Get\n(@ip_LiveIndicator=0, @op_MaxSequenceID)
+activate Staging
+
+Staging -> Staging : SELECT from MatchMonitorStagingArbitrageNonLive\nWHERE SequenceID > LastScannedSequenceID\nGROUP BY MatchID, ScoreDiff, BettypeID, BetID, HDP\nLIMIT 5000
+
+Staging --> DataAccess : MatchStagingList (grouped) + MaxSequenceID
+deactivate Staging
+
+DataAccess --> ArbitrageService : MatchMonitorRuleArbitrageModel\n(MatchStagingList, MaxSequenceID)
+deactivate DataAccess
+
+ArbitrageService -> ArbitrageService : Group matches by\n(MatchID, ScoreDiff, BettypeID, BetID, HDP)
+
+ArbitrageService --> JobService : MatchStagingRuleArbitrageProcessModel\n(with grouped matches)
+deactivate ArbitrageService
+
+== Phase 2: Process Round 1 (Parallel) ==
+
+note over JobService
+  Process all match groups in parallel
+  (4 threads by default)
+end note
+
+par Match Group 1
+  JobService -> ArbitrageService : GetInstanceProcessArbitrageService()
+  activate ArbitrageService
+  
+  ArbitrageService -> ProcessService : Create new instance
+  activate ProcessService
+  
+  ArbitrageService --> JobService : ProcessService instance
+  deactivate ArbitrageService
+  
+  JobService -> ProcessService : PrepareProcess(matchGroup1, isLive=false)
+  
+  ProcessService -> ProcessService : Store match group
+  
+  JobService -> ProcessService : ProcessRound1()
+  
+  ProcessService -> AssDetect : DetectAssociation(\nCTSCustIDList,\nAgentCTSCustIDList)
+  activate AssDetect
+  
+  note right of AssDetect
+    3 Criteria:
+    - Device ✅
+    - AI ✅
+    - IP ✅
+  end note
+  
+  AssDetect -> CTSDB : Query association tables\n(Device, AI, IP)
+  activate CTSDB
+  CTSDB --> AssDetect : Associated groups
+  deactivate CTSDB
+  
+  AssDetect --> ProcessService : DetectAssociationMergeGroupEntity[]\n(CustID + GroupID)
+  deactivate AssDetect
+  
+  ProcessService -> ProcessService : Filter: WHERE GroupID != null
+  
+  alt Has Associated Groups
+    ProcessService -> DataAccess : ProcessRuleArbitrage(\nisLive=false,\nmatchInfo,\nsequenceIDList,\ngroupDetectionJson)
+    activate DataAccess
+    
+    DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleArbitrage_Process\n(@ip_MatchID, @ip_CustGroup, ...)
+    activate Staging
+    
+    Staging -> Staging : Parse CustGroup JSON\nGet all tickets for customers\nTime-based grouping (TimeStep)\nCheck opposite bets\nValidate stake threshold
+    
+    Staging --> DataAccess : CompleteMatches +\nReprocessMatches
+    deactivate Staging
+    
+    DataAccess --> ProcessService : MatchProcessRuleArbitrageModel
+    deactivate DataAccess
+    
+    ProcessService -> ProcessService : Add to MatchProcesses list
+  end
+  
+  ProcessService --> JobService : ProcessService (with results)
+
+else Match Group 2, 3, 4...
+  note over JobService
+    Same flow for other match groups
+    (executed in parallel)
+  end note
+end
+
+note over JobService
+  Sleep 50ms between matches
+end note
+
+== Phase 3: Process Round 2 (Reprocess) ==
+
+JobService -> ProcessService : ProcessRound2()
+
+loop For each Reprocess Match
+  ProcessService -> ProcessService : Get ReprocessMatches from Round 1
+  
+  ProcessService -> AssDetect : DetectAssociation(\nUpdatedCTSCustIDList,\nUpdatedAgentCTSCustIDList)
+  activate AssDetect
+  
+  AssDetect -> CTSDB : Query association tables
+  activate CTSDB
+  CTSDB --> AssDetect : Updated associated groups
+  deactivate CTSDB
+  
+  AssDetect --> ProcessService : Updated associations
+  deactivate AssDetect
+  
+  alt Has New Associated Groups
+    ProcessService -> DataAccess : ProcessRuleArbitrage\n(with updated data)
+    activate DataAccess
+    
+    DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleArbitrage_Process\n(Round 2)
+    activate Staging
+    Staging --> DataAccess : Additional CompleteMatches
+    deactivate Staging
+    
+    DataAccess --> ProcessService : MatchProcessRuleArbitrageModel\n(RoundNumber=2)
+    deactivate DataAccess
+    
+    ProcessService -> ProcessService : Add to MatchProcesses list
+  end
+end
+
+ProcessService --> JobService : ProcessService (final results)
+
+== Phase 4: Complete & Save ==
+
+JobService -> ProcessService : Complete(maxSequenceID)
+
+ProcessService -> ProcessService : Merge all CompleteMatches\n(Round 1 + Round 2)
+
+ProcessService -> ProcessService : Group by TransIDList\nAssign unique GroupID (1, 2, 3, ...)
+
+alt Has Complete Matches
+  ProcessService -> ProcessService : Serialize TransGroupJson
+  
+  ProcessService -> DataAccess : CompleteTransRuleArbitrage(para)
+  activate DataAccess
+  
+  DataAccess -> CTSDB : CALL CTS_DC_MatchMonitor_RuleArbitrage_Complete\n(@ip_TransGroupJson, ...)
+  activate CTSDB
+  
+  CTSDB -> CTSDB : INSERT INTO CTSMatchMonitor\n(Reason='AR')
+  CTSDB -> CTSDB : INSERT INTO CTSMatchMonitorDetail
+  
+  CTSDB --> DataAccess : Success
+  deactivate CTSDB
+  
+  DataAccess --> ProcessService : Done
+  deactivate DataAccess
+end
+
+ProcessService -> ProcessService : WriteLogSentryIfError\n(check Round 2 issues)
+
+ProcessService --> JobService : ProcessService (complete)
+deactivate ProcessService
+
+== Phase 5: Clean Staging ==
+
+JobService -> ArbitrageService : CleanTransRuleArbitrage(isLive=false, maxSequenceID)
+activate ArbitrageService
+
+ArbitrageService -> DataAccess : CleanTransRuleArbitrage(isLive=false, maxSequenceID)
+activate DataAccess
+
+DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleArbitrage_TransClean\n(@ip_MaxSequenceID)
+activate Staging
+
+Staging -> Staging : DELETE FROM MatchMonitorStagingArbitrageNonLive\nWHERE SequenceID <= MaxSequenceID
+
+Staging --> DataAccess : Success
+deactivate Staging
+
+DataAccess --> ArbitrageService : Done
+deactivate DataAccess
+
+ArbitrageService --> JobService : Done
+deactivate ArbitrageService
+
+== Return Result ==
+
+JobService --> Controller : true
+deactivate JobService
+
+Controller --> Job : HTTP 200 OK
+deactivate Controller
+
+note right of Job
+  **Next Steps:**
+  1. Classification jobs read from CTSMatchMonitor
+     (Reason = 'AR')
+  2. Customers with arbitrage tickets are classified
+  3. Website displays arbitrage matches
+end note
+
+@enduml
+

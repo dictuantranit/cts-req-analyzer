@@ -1,0 +1,59 @@
+@startuml ProbationClassificationBySport_DatabaseFlow
+!theme plain
+title Probation Classification By Sport - Database Flow Diagram
+
+start
+:Job Triggered;
+
+:GetProbationScanClassificationBySport;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Stored Procedure: CTS_DC_CustClassification_BySport_ProbationScan_Get
+    Input:
+    - SystemParameter (ParameterID = 168, 169)
+    Tables:
+    - CTSCustomerClassification_BySport
+    - CustomerCategory
+    - CTSCustomerAssociationStatus (Archive)
+    Output:
+    - CustProbations (CustID, SportGroup)
+    - LastCustID
+end note
+
+if (Has Customers?) then (yes)
+    :PreprocessProbationClassificationBySport;
+    note right
+        Database: bodb_VR2Model (SQL Server)
+        Stored Procedure: CTS_BySportNormalClassification_Probation_Preprocess
+        Input:
+        - CustomersXML
+        Tables:
+        - custInfo (bodb02)
+        - CustomerClassification_BySport_LatestActiveDay
+        - CustomerClassification_BySport_Priority
+        - Normal Pool (via NormalPool_Insert)
+        Logic:
+        - Filter disabled accounts
+        - Filter inactive customers
+        - Insert into Normal Pool
+    end note
+    
+    :UpdateCompleteProbationScanBySport;
+    note right
+        Database: CTS_DataCenter (MySQL)
+        Table: SystemParameter
+        Updates:
+        - ParameterID = 169: LastCustID
+    end note
+else (no)
+    :UpdateCompleteProbationScanBySport;
+    note right
+        Update SystemParameter
+        Stop processing
+    end note
+endif
+
+stop
+
+@enduml
+

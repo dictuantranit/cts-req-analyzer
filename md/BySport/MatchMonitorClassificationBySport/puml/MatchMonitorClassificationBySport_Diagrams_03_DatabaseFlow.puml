@@ -1,0 +1,108 @@
+@startuml MatchMonitorClassificationBySport_DatabaseFlow
+!theme plain
+title Match Monitor Classification By Sport - Database Flow Diagram
+
+start
+:Job Request Received;
+
+if (Action Type?) then (ClassifyMatchMonitor)
+    :Create ClassifyMatchMonitorBySportCriteria;
+    note right
+        Parameters:
+        - @ip_BatchSize
+    end note
+    :Execute CTS_DC_CustClassification_BySport_MatchMonitor_Classify;
+    :Process Results;
+    note right
+        Returns:
+        - CustInfos (CustID, CTSCustID, MatchID, SportGroup, etc.)
+        - MMDetailIDList (comma-separated)
+        - MatchID
+    end note
+    :Return ClassifyGBMatchMonitorBySportModel;
+    
+elseif (GetPALosingBySport) then
+    :Create ProblemAccountClassificationBySportGetCriteria;
+    note right
+        Parameters:
+        - @ip_CustJson (JSON array)
+        - @ip_FunctionId (54 = ClassifyGBMatchMonitor)
+    end note
+    :Execute CTS_ProblemAccountsClassification_BySport_Daily;
+    :Process Losing Performance Data;
+    note right
+        Returns:
+        - BetCount
+        - ActiveDays
+        - TurnoverRM
+        - WinlossRM
+        - WinlossStatus
+        - PerformanceTime
+    end note
+    :Return ProblemAccountLosingBySportEntity[];
+    
+elseif (InsertCustomerClassificationBySport) then
+    :Create InsertCustomerClassificationBySportCriteria;
+    note right
+        Parameters:
+        - @ip_InputFlowID = 335 (BySportInsertPA)
+        - @ip_CustInfo (JSON array)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_Insert;
+    note right
+        Internal Steps:
+        1. Insert_GetInfo - Parse and validate JSON
+        2. Insert_Process - Process classification logic
+        3. Insert_Complete - Complete insertion
+    end note
+    :Process Insertion Results;
+    :Return InsertPABySportResultModel[];
+    
+elseif (PushCCBySportToMainDB) then
+    :Get Customer Classification By Sport;
+    note right
+        Query:
+        SELECT CustID, SportID, CustomerClass
+        FROM CustomerClassification_BySport
+        WHERE (CustID, SportID) IN (...)
+    end note
+    :Create CustomerClassificationUpdateBySportToMainDBEntity[];
+    :Execute UpdateCustomerClassificationBySport [MainDB SP];
+    note right
+        Parameters:
+        - @CustClassification (JSON)
+        Returns:
+        - ErrorCode
+        - ErrorMsg
+    end note
+    :Process Update Results;
+    :Return Success/Failure;
+    
+elseif (ClassifyCompletedMatchMonitor) then
+    :Create ClassifyCompletedMatchMonitorBySportCriteria;
+    note right
+        Parameters:
+        - @ip_MatchID
+        - @ip_MMDetailsIDList (comma-separated string)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_MatchMonitor_Completed;
+    :Update MatchMonitorDetails Status;
+    note right
+        Updates:
+        - MatchMonitorDetails.ClassifyStatusBySport = 1 (Completed)
+        - If MMDetailsIDList is NULL:
+          * MatchMonitor.ClassifyStatusBySport = 1
+          * SystemParameter.ParameterValue = 0
+    end note
+    :Return Success;
+    
+else (Other Actions)
+    :Handle Other Requests;
+endif
+
+:Map to Entities/Models;
+:Return to Service Layer;
+stop
+
+@enduml
+

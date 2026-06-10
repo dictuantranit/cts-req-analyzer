@@ -1,0 +1,37 @@
+@startuml NormalAccountInsertBySport_SP_Complete_Detailed
+!theme plain
+title Normal Account Insert By Sport - SP Complete Detailed
+
+start
+
+:Call SP: CTS_BySportNormalClassification_NormalAccount_Complete;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Input: @ScannedMaxId
+end note
+
+if (@ScannedMaxId IS NOT NULL?) then (yes)
+    :Update CustomerClassification_Parameter;
+    note right
+        Table: CustomerClassification_Parameter
+        DataId = 2 (BYSPORT_LASTSCANNEDROW)
+        Update: Value = CONVERT(VARCHAR(200), @ScannedMaxId)
+        Lock: ROWLOCK, UPDLOCK
+    end note
+    
+    :Set last scanned RowVersion;
+    note right
+        This marks the progress of the job
+        Next run will start from this RowVersion
+    end note
+else (no)
+    :Skip update;
+    note right
+        If ScannedMaxId is NULL, no update needed
+    end note
+endif
+
+stop
+
+@enduml
+

@@ -1,0 +1,220 @@
+@startuml Arbitrage_MainFlow
+!theme plain
+title Match Monitor - Arbitrage Detection - Main Flow (5 Phases)
+
+start
+
+:API Endpoint Called;
+note right
+  MatchMonitorProcessRuleArbitrageNonLive
+  
+  IMPORTANT: NonLive ONLY!
+  No live arbitrage detection.
+  
+  Parameters:
+  - numberOfThread (default 4)
+end note
+
+partition "Phase 1: GET STAGING MATCHES" {
+  :Call GetMatchRuleArbitrage;
+  note right
+    SP: CTS_DC_MatchMonitor_RuleArbitrage_Get
+    
+    Input:
+    - ip_LiveIndicator = false (NonLive only)
+    
+    Output:
+    - MatchStagingList (grouped matches)
+    - MaxSequenceID
+  end note
+  
+  :Read from Staging Table;
+  note right
+    Table: MatchMonitorStagingArbitrageNonLive
+    (Pool 2004)
+    
+    WHERE SequenceID > LastScannedSequenceID
+    LIMIT 5000 matches
+  end note
+  
+  :Group Matches by Key;
+  note right
+    GROUP BY:
+    - MatchID
+    - IsMajorLeague
+    - ScoreDiff
+    - BettypeID
+    - BetID
+    - HDP
+    
+    Each group = MatchStagingRuleArbitrageGroupModel
+  end note
+}
+
+if (Matches found?) then (yes)
+  partition "Phase 2: PROCESS ROUND 1 (Parallel)" {
+    :Process All Match Groups in Parallel;
+    note right
+      AsParallel()
+      .WithDegreeOfParallelism(numberOfThread)
+      
+      Default: 4 threads
+    end note
+    
+    fork
+      :Match Group 1;
+      :PrepareProcess;
+      :Detect Association\n(3 Criteria);
+      note right
+        Device ✅
+        AI ✅
+        IP ✅
+      end note
+      :Call SP Process;
+      :Return: Complete + Reprocess;
+    fork again
+      :Match Group 2;
+      :PrepareProcess;
+      :Detect Association\n(3 Criteria);
+      :Call SP Process;
+      :Return: Complete + Reprocess;
+    fork again
+      :Match Group 3;
+      :PrepareProcess;
+      :Detect Association\n(3 Criteria);
+      :Call SP Process;
+      :Return: Complete + Reprocess;
+    fork again
+      :Match Group 4;
+      :PrepareProcess;
+      :Detect Association\n(3 Criteria);
+      :Call SP Process;
+      :Return: Complete + Reprocess;
+    end fork
+    
+    :Collect Results from Round 1;
+    note right
+      For each match:
+      - CompleteMatches (ready to save)
+      - ReprocessMatches (need Round 2)
+    end note
+    
+    :Sleep 50ms between matches;
+  }
+  
+  partition "Phase 3: PROCESS ROUND 2 (Reprocess)" {
+    if (Has Reprocess Matches?) then (yes)
+      :For each Reprocess Match;
+      note right
+        Some matches need reprocessing:
+        - New associations discovered
+        - Additional customer data available
+      end note
+      
+      :Re-detect Association;
+      note right
+        Same 3 criteria:
+        - Device
+        - AI
+        - IP
+        
+        But with updated customer lists
+      end note
+      
+      :Call SP Process (Round 2);
+      note right
+        SP: CTS_DC_MatchMonitor_RuleArbitrage_Process
+        
+        Input:
+        - Updated CTSCustIDList
+        - Updated SequenceIDList
+        - New CustGroup JSON
+      end note
+      
+      :Add to Complete Matches;
+    else (no)
+      :Skip Round 2;
+    endif
+  }
+  
+  partition "Phase 4: COMPLETE & SAVE" {
+    :Merge Results from Round 1 + Round 2;
+    note right
+      Combine all CompleteMatches:
+      - From Round 1
+      - From Round 2
+    end note
+    
+    :Group by TransIDList;
+    note right
+      Merge duplicate groups:
+      - Same ticket combinations
+      - Assign unique GroupID (1, 2, 3, ...)
+    end note
+    
+    if (Has Complete Matches?) then (yes)
+      :Serialize TransGroupJson;
+      note right
+        JSON format:
+        [
+          {
+            "GroupID": 1,
+            "TransIDList": "...",
+            "CustIDList": "...",
+            ...
+          }
+        ]
+      end note
+      
+      :Call SP Complete;
+      note right
+        SP: CTS_DC_MatchMonitor_RuleArbitrage_Complete
+        
+        Actions:
+        - INSERT CTSMatchMonitor (Reason='AR')
+        - INSERT CTSMatchMonitorDetail
+        - Mark timestamps
+      end note
+    else (no)
+      :No detections to save;
+    endif
+  }
+  
+  partition "Phase 5: CLEAN STAGING" {
+    :Call CleanTransRuleArbitrage;
+    note right
+      SP: CTS_DC_MatchMonitor_RuleArbitrage_TransClean
+      
+      DELETE FROM MatchMonitorStagingArbitrageNonLive
+      WHERE SequenceID <= MaxSequenceID
+      
+      Clean processed tickets to free space
+    end note
+  }
+  
+  :Return Success (true);
+else (no)
+  :No matches to process;
+  :Return Success (true);
+endif
+
+stop
+
+note right
+  **Execution Frequency:**
+  - NonLive only: Every 5 minutes
+  
+  **Parallel Processing:**
+  - 4 threads (default)
+  
+  **Association Criteria:**
+  - Device, AI, IP (3 criteria)
+  
+  **Key Difference:**
+  - Cross-platform detection
+  - Opposite bets validation
+  - Agent detection (Alpha/Maxbet)
+end note
+
+@enduml
+

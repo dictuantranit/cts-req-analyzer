@@ -1,0 +1,302 @@
+@startuml MatchMonitorClassification_SP_Classify
+title CTS_DC_CustClassification_MatchMonitor_Classify - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #F57C00
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+
+start
+:SP: **CTS_DC_CustClassification_MatchMonitor_Classify**;
+note right
+  **Database**: CTS_DataCenter.ctsServiceAdmin
+  **Purpose**: Main detection & classification logic
+  **Called by**: ClassifyMatchMonitor Job
+  **Returns**: 3 ResultSets
+  **Complexity**: HIGH (complex detection rules)
+end note
+
+partition "Step 1: Select ONE Match (FIFO)" {
+  :Declare @CurrentMatchID;
+  
+  :Execute Query;
+  note right
+    **FIFO Queue Selection**:
+    ```sql
+    SELECT TOP 1 @CurrentMatchID = MatchID
+    FROM CTSMatchMonitor
+    WHERE IsCompleted = 0
+      AND (IsProcessed = 0 OR IsProcessed IS NULL)
+    ORDER BY ID ASC  -- FIFO: First In, First Out
+    LIMIT 1
+    ```
+    
+    **Queue Logic**:
+    - Select oldest unprocessed match
+    - One match at a time
+    - Automatic ordering by ID
+    - NULL if queue is empty
+  end note
+  
+  if (@CurrentMatchID IS NOT NULL?) then (yes)
+    :Mark as Processing;
+    note right
+      **Lock Match**:
+      ```sql
+      UPDATE CTSMatchMonitor
+      SET IsProcessing = 1,
+          ProcessStartTime = NOW()
+      WHERE MatchID = @CurrentMatchID
+      ```
+      
+      **Prevents**:
+      - Concurrent processing
+      - Race conditions
+      - Duplicate classification
+    end note
+  else (no)
+    :Return empty ResultSets;
+    note right
+      **No match to process**:
+      - All matches completed
+      - Queue is empty
+      - Job exits gracefully
+    end note
+    stop
+  endif
+}
+
+partition "Step 2: Run Group Betting Detection" {
+  :Get Match Details;
+  note right
+    **Fetch Ticket Data**:
+    ```sql
+    SELECT 
+      d.ID as DetailID,
+      d.TicketID,
+      d.CustID,
+      d.BetAmount,
+      d.BetType,
+      d.IP,
+      d.DeviceID,
+      m.HomeTeamID,
+      m.AwayTeamID,
+      m.LeagueID,
+      m.EventDate
+    FROM CTSMatchMonitorDetail d
+    INNER JOIN CTSMatchMonitor m 
+      ON d.MatchID = m.MatchID
+    WHERE d.MatchID = @CurrentMatchID
+      AND d.IsProcessed = 0
+    ```
+  end note
+  
+  :Apply Detection Rules;
+  note right
+    **Group Betting Detection Rules**:
+    
+    **Rule 1: Same IP/Device**
+    - Multiple CustIDs from same IP
+    - Multiple CustIDs from same Device
+    - Threshold: 3+ customers
+    
+    **Rule 2: Similar Bet Patterns**
+    - Same bet amounts
+    - Same bet types
+    - Same timing (within 5 minutes)
+    - Threshold: 5+ tickets
+    
+    **Rule 3: Related Customers**
+    - Check CTSAssociation table
+    - Known related accounts
+    - Same household/group
+    
+    **Rule 4: Suspicious Volume**
+    - Total bet volume exceeds threshold
+    - Unusual bet distribution
+    - Coordinated betting behavior
+    
+    **Scoring**:
+    - Each rule adds score
+    - Score >= Threshold → Fraud
+    - Store detection reason
+  end note
+  
+  :Identify Fraud Tickets;
+  note right
+    **Flag Suspicious Tickets**:
+    ```sql
+    CREATE TEMPORARY TABLE #FraudTickets (
+      DetailID INT,
+      CustID BIGINT,
+      Reason VARCHAR(500),
+      Score INT
+    )
+    
+    INSERT INTO #FraudTickets
+    SELECT DetailID, CustID, Reason, Score
+    FROM DetectionResults
+    WHERE Score >= @FraudThreshold
+    ```
+  end note
+}
+
+partition "Step 3: Extract Customer Info" {
+  :Get Customer Classification Data;
+  note right
+    **Build Customer List**:
+    ```sql
+    SELECT DISTINCT
+      c.CustID,
+      c.SportGroupID,
+      cat.CategoryID,
+      cat.CategoryName,
+      ft.Reason,
+      -- Additional customer info
+      cust.UserName,
+      cust.RegisterDate,
+      cust.LastLoginDate
+    FROM #FraudTickets ft
+    INNER JOIN CTSMatchMonitorDetail c 
+      ON ft.DetailID = c.ID
+    LEFT JOIN CTSCategory cat
+      ON cat.CategoryName = 'Group Betting'
+      AND cat.SportGroupID = c.SportGroupID
+    LEFT JOIN CustomerInfo cust
+      ON cust.CustID = c.CustID
+    WHERE ft.Score >= @FraudThreshold
+    ```
+    
+    **Customer Info Extracted**:
+    - CustID (to classify)
+    - SportGroupID (sport context)
+    - CategoryID (CC type: Group Betting)
+    - Reason (why flagged)
+    - Additional metadata
+  end note
+  
+  :Store in Temp Table;
+  note right
+    **Temp Table Structure**:
+    ```sql
+    CREATE TEMPORARY TABLE #CustInfos (
+      CustID BIGINT,
+      SportGroupID INT,
+      CategoryID INT,
+      CategoryName VARCHAR(100),
+      Reason VARCHAR(500)
+    )
+    ```
+  end note
+}
+
+partition "Step 4: Prepare Return Values" {
+  :Get MMDetailIDList;
+  note right
+    **Build Fraud Ticket ID List**:
+    ```sql
+    SELECT @MMDetailIDList = 
+      GROUP_CONCAT(DetailID SEPARATOR ',')
+    FROM #FraudTickets
+    ORDER BY DetailID
+    ```
+    
+    **Example Output**: "12345,67890,11111"
+    
+    **Used For**:
+    - Mark tickets as processed
+    - Track which tickets were flagged
+    - Audit trail
+  end note
+}
+
+partition "ResultSet 1: Customer Infos" {
+  :SELECT * FROM #CustInfos;
+  note right
+    **Returns**: ClassifyGBMMCustInfosEntity[]
+    
+    **Fields**:
+    - CustID (bigint) - Customer to classify
+    - SportGroupID (int) - Sport context
+    - CategoryID (int) - CC category
+    - CategoryName (varchar) - "Group Betting"
+    - Reason (varchar) - Detection reason
+    
+    **Count**: 0 to N customers
+    **Empty if**: No fraud detected
+  end note
+}
+
+partition "ResultSet 2: MMDetailIDList" {
+  :SELECT @MMDetailIDList;
+  note right
+    **Returns**: string (comma-separated)
+    
+    **Example**: "12345,67890,11111"
+    
+    **Purpose**:
+    - Mark tickets as processed
+    - Pass to Completed SP
+    - Track fraud tickets
+    
+    **NULL if**: No fraud detected
+  end note
+}
+
+partition "ResultSet 3: MatchID" {
+  :SELECT @CurrentMatchID;
+  note right
+    **Returns**: int? (nullable)
+    
+    **Value**: Current match being processed
+    
+    **Purpose**:
+    - Pass to Completed SP
+    - Track which match was processed
+    - Link to match data
+    
+    **NULL if**: No match in queue
+  end note
+}
+
+:Complete;
+
+note right
+  **Key Characteristics**:
+  
+  **Complex Logic**:
+  - Multi-rule detection engine
+  - Scoring system
+  - Temporary tables
+  - Multiple joins
+  
+  **Performance**:
+  - One match at a time
+  - Indexed queries
+  - Optimized for speed
+  - Timeout handling
+  
+  **Return Strategy**:
+  - 3 ResultSets for efficiency
+  - Single SP call
+  - Reduce round trips
+  - Atomic operation
+  
+  **Error Handling**:
+  - Transaction management
+  - Rollback on failure
+  - Error logging
+  - Graceful degradation
+  
+  **Related SPs**:
+  - Called by ClassifyMatchMonitor Job
+  - Returns data for InsertProblemAccount
+  - Passes IDs to Completed SP
+end note
+
+stop
+
+@enduml
+

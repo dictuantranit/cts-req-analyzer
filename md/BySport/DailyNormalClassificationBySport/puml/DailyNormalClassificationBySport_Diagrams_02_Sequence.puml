@@ -1,0 +1,132 @@
+@startuml DailyNormalClassificationBySport_Sequence
+!theme plain
+title Daily Normal Classification By Sport - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationBySportJob\nController" as Controller
+participant "DailyNormalClassificationBySport\nJobService" as JobService
+participant "DailyNormalClassificationBySport\nService" as Service
+participant "DailyNormalClassificationBySport\nDataAccess" as DataAccess
+participant "SystemParameter\nService" as SysParamService
+database "MySQL\nCTS_DataCenter" as DB
+database "SQL Server\nbodb_VR2Model" as VR2DB
+
+Scheduler -> Controller: POST /api/classificationBySportJobs/ScanningDailyNormalClassificationBySport
+activate Controller
+
+Controller -> JobService: Execute()
+activate JobService
+
+loop Do-While (isContinue)
+    JobService -> Service: Start()
+    activate Service
+    
+    Service -> Service: Initialize NormalAccountBySportModel
+    Service --> JobService: this
+    deactivate Service
+    
+    JobService -> Service: GetCustClassificationForDailyScanning()
+    activate Service
+    
+    Service -> DataAccess: GetDailyNormalAccountsClassificationBySport()
+    activate DataAccess
+    
+    DataAccess -> DataAccess: Create GetDailyNormalAccountsClassificationBySportCriteria
+    note right of DataAccess
+        Get SystemParameter:
+        - ParameterID = 114 (LastCategoryID)
+        - ParameterID = 115 (LastCustID)
+    end note
+    
+    DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScan_GetNormal\n@op_LastCategoryID OUTPUT, @op_LastCustID OUTPUT
+    activate DB
+    note right of DB
+        Stored Procedure:
+        - Get normal categories
+        - Find customers to scan
+        - Return: CustID, SportGroup
+        - Output: LastCategoryID, LastCustID
+    end note
+    DB --> DataAccess: ResultSet: NormalAccountBySportEntity[]\nLastCategoryID, LastCustID
+    deactivate DB
+    
+    DataAccess --> Service: NormalAccountBySportModel
+    deactivate DataAccess
+    
+    Service --> JobService: this
+    deactivate Service
+    
+    alt Has Customers
+        JobService -> Service: PreprocessDailyNormalClassification()
+        activate Service
+        
+        Service -> Service: Convert customers to XML string
+        note right of Service
+            Serialize NormalAccounts
+            to XML format
+        end note
+        
+        Service -> DataAccess: PreprocessDailyNormalAccountsClassificationBySport(customersXML)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create PreprocessDailyNormalAccountsClassificationBySportCriteria
+        DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_Daily_Preprocess\n@CustomersXML
+        activate VR2DB
+        note right of VR2DB
+            Stored Procedure:
+            - Parse XML customer list
+            - Remove disabled accounts
+            - Remove scanned customers
+            - Remove inactive customers
+            - Get Priority
+            - Call NormalPool_Insert
+        end note
+        VR2DB --> DataAccess: Success
+        deactivate VR2DB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service --> JobService: this
+        deactivate Service
+        
+        JobService -> Service: UpdateLastScan()
+        activate Service
+        
+        Service -> SysParamService: UpdateTimingExecution(LastCategoryID, ParameterID=114)
+        activate SysParamService
+        SysParamService -> DB: UPDATE SystemParameter\nSET ParameterValue = LastCategoryID\nWHERE ParameterID = 114
+        SysParamService --> Service: void
+        deactivate SysParamService
+        
+        Service -> SysParamService: UpdateTimingExecution(LastCustID, ParameterID=115)
+        activate SysParamService
+        SysParamService -> DB: UPDATE SystemParameter\nSET ParameterValue = LastCustID\nWHERE ParameterID = 115
+        SysParamService --> Service: void
+        deactivate SysParamService
+        
+        Service --> JobService: true (continue)
+        deactivate Service
+    else No Customers
+        JobService -> Service: UpdateLastScan()
+        activate Service
+        
+        Service -> SysParamService: UpdateTimingExecution(...)
+        activate SysParamService
+        SysParamService -> DB: UPDATE SystemParameter
+        SysParamService --> Service: void
+        deactivate SysParamService
+        
+        Service --> JobService: false (stop)
+        deactivate Service
+    end
+end
+
+JobService --> Controller: Task<bool> (true)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true/false }
+deactivate Controller
+
+@enduml
+

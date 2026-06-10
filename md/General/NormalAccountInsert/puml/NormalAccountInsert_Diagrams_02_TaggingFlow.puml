@@ -1,0 +1,160 @@
+@startuml NormalAccountInsert_TaggingFlow
+!theme plain
+title Normal Account Insert - Tagging Flow (3 Steps)
+
+start
+
+:Input: GetNormalAccountEntity[];
+note right
+    Classified customers with:
+    - CustId, CategoryId
+    - ScanTaggingType
+    - ScanTaggingTWType
+    - ScanSpecialLicSubType
+end note
+
+:Create ProcessTaggingModel[];
+note right
+    Initialize tagging model:
+    - TaggingID = 0
+    - TaggingType = 0
+    - TW metrics = 0
+end note
+
+partition "Step 1: Process TW Tagged Customers" {
+  :Filter customers where ScanTaggingTWType = 1;
+  
+  if (Has TW customers?) then (yes)
+    :CheckGroupBettingAndRejectCustomer;
+    :Call CTS_NormalClassification_NormalAccount_TWGroupBettingAndReject_Check [SP];
+    note right
+        Returns TW Tagged customers:
+        - TaggingID, TaggingType
+        - TWBetCount
+        - TWGroupBettingRate
+        - TWTicketRejectRate
+        - TWDesktopUsageRate
+    end note
+    
+    :Create TWTaggedExcludeModel[];
+    note right
+        Join TW Tagged + CTS customers:
+        - CustID
+        - CategoryID
+        - TaggingID
+    end note
+    
+    :CheckTWTaggingExclude;
+    :Call CTS_DC_NormalClassification_TW_CheckExclude [SP];
+    note right
+        Returns customers that SHOULD be tagged
+        (Exclusion rules based on Category + Tagging)
+    end note
+    
+    :Filter TW Tagged by exclusion result;
+    note right
+        Keep only customers returned by CheckExclude
+    end note
+    
+    :Merge TW Tagged data to ProcessTaggingModel;
+    note right
+        If customer in TW Tagged result:
+        - Set TaggingID
+        - Set TaggingType
+        - Set TW metrics
+    end note
+  else (no)
+    :Skip TW tagging;
+  endif
+}
+
+partition "Step 2: Process Association with PA" {
+  :Filter customers where TaggingID = 0;
+  note right
+      Only process customers not
+      already tagged in Step 1
+  end note
+  
+  if (Has customers?) then (yes)
+    :Join CustIds to comma-separated string;
+    
+    :GetCustsAssociationProblemAccount;
+    :Call CTS_DC_CustClassification_GetTaggingByAssociationWithPA [SP];
+    note right
+        Returns customers associated with PA:
+        - CustID
+        - TaggingID (Association tagging)
+        - TaggingType
+    end note
+    
+    :Merge Association PA data to ProcessTaggingModel;
+    note right
+        If customer associated with PA:
+        - Set TaggingID
+        - Set TaggingType
+    end note
+  else (no)
+    :Skip Association PA tagging;
+  endif
+}
+
+partition "Step 3: Process TW Tagged Special LicSub" {
+  :Filter customers where TaggingID = 0;
+  note right
+      Only process customers not
+      tagged in Step 1 or Step 2
+  end note
+  
+  if (Has customers?) then (yes)
+    :Select CustID + ScanSpecialLicSubType;
+    :Serialize to JSON;
+    
+    :GetTWTaggedCustBySpecialLicSub;
+    :Call CTS_DC_NormalClassification_NormalAccount_TWTaggedSpecialLicSub_Check [SP];
+    note right
+        Returns Special LicSub TW Tagged:
+        - CustID
+        - TaggingID (Special LicSub tagging)
+        - TaggingType
+    end note
+    
+    :Merge TW Special LicSub data to ProcessTaggingModel;
+    note right
+        If customer has Special LicSub tagging:
+        - Set TaggingID
+        - Set TaggingType
+    end note
+  else (no)
+    :Skip Special LicSub tagging;
+  endif
+}
+
+:Convert ProcessTaggingModel[] to InsertNormalAccountEntity[];
+note right
+    Final result with:
+    - CategoryId (from classification)
+    - TaggingID (from 3-step tagging)
+    - TaggingType
+    - TW metrics (if TW tagged)
+end note
+
+:Output: InsertNormalAccountEntity[];
+
+note right
+  **Tagging Priority**:
+  1. TW Tagged (Group Betting/Reject) - HIGHEST
+  2. Association with PA - MEDIUM
+  3. TW Tagged Special LicSub - LOWEST
+  
+  **Key Rules**:
+  - Earlier tagging has priority
+  - Later steps skip if already tagged (TaggingID != 0)
+  - Exclusion rules apply to TW tagging
+  - Association PA applied if not TW tagged
+  - Special LicSub applied if no other tagging
+end note
+
+stop
+
+@enduml
+

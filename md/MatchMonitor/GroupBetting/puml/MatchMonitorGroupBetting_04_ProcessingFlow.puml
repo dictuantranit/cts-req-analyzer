@@ -1,0 +1,540 @@
+@startuml MatchMonitorGroupBetting_ProcessingFlow
+!theme plain
+title Match Monitor Group Betting - Processing Flow (Round 1 & Round 2 Detection)
+
+start
+
+:API Endpoint Called;
+note right
+    POST /api/matchmonitor/MatchMonitorProcessRuleGroupBettingLive
+    or POST /api/matchmonitor/MatchMonitorProcessRuleGroupBettingNonLive
+    
+    Parameters:
+    - numberOfThread: Number of parallel threads (e.g., 4)
+    - sportsDevice: "1,2,3,4,5" (Device detection sports)
+    - sportsAI: "1,2,3,4,5" (AI detection sports)
+    - sportsIP: "1,2,3,4,5" (IP detection sports)
+    - sports3MatchesLast7Days: "1,2,3,4,5"
+    - sportsIPLast3Days: "1,2,3,4,5"
+end note
+
+:Parse Association Settings;
+note right
+    Create MatchDetectAssociationSettingModel:
+    
+    var associationSetting = new MatchDetectAssociationSettingModel(
+        sportsDevice: "1,2,3,4,5",
+        sportsAI: "1,2,3,4,5",
+        sportsIP: "1,2,3,4,5",
+        sports3MatchesLast7Days: "1,2,3,4,5",
+        sportsIPLast3Days: "1,2,3,4,5"
+    );
+    
+    Parsed to:
+    - DeviceSports = HashSet<int> {1, 2, 3, 4, 5}
+    - AISports = HashSet<int> {1, 2, 3, 4, 5}
+    - IPSports = HashSet<int> {1, 2, 3, 4, 5}
+    - _3MatchesLast7DaysSports = HashSet<int> {1, 2, 3, 4, 5}
+    - IPLast3DaysSports = HashSet<int> {1, 2, 3, 4, 5}
+end note
+
+:MatchMonitorJobService.ProcessRuleGroupBetting(isLive, numberOfThread, assDetectSetting);
+
+:GetMatchRuleGroupBetting(isLive);
+
+:Database Query - Get Match List;
+note right
+    Database: CTS_DataCenter (MySQL)
+    SP: CTS_MatchMonitor_RuleGroupBetting_Get
+    
+    Input: @IsLive = 1 (or 0)
+    
+    Step 1: Get MaxSequenceID
+    SELECT MAX(SequenceID) as MaxSequenceID
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive = @IsLive
+        AND PoolType = 1  -- GroupBetting Pool
+        AND IsProcessed = 0;
+    
+    Returns: MaxSequenceID = 12346678
+    
+    Step 2: Get Match List (Grouped)
+    SELECT 
+        MatchID,
+        ScoreDiff,
+        BettypeID,
+        BetID,
+        Betteam,
+        GROUP_CONCAT(SequenceID) as SequenceIDList,
+        GROUP_CONCAT(CTSCustID) as CTSCustIDList,
+        GROUP_CONCAT(CustID) as CustIDList,
+        GROUP_CONCAT(DISTINCT LicenseCustID) as LicCustList,
+        SportType
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive = @IsLive
+        AND PoolType = 1
+        AND IsProcessed = 0
+        AND SequenceID <= MaxSequenceID
+    GROUP BY MatchID, ScoreDiff, BettypeID, BetID, Betteam;
+    
+    Returns: MatchStagingList[] (e.g., 50 match groups)
+    
+    Example Record:
+    - MatchID: 987654
+    - ScoreDiff: "0-0"
+    - BettypeID: 1 (Asian Handicap)
+    - BetID: "AH-0.5"
+    - Betteam: "H" (Home)
+    - SequenceIDList: "12345679,12345680,12345681,..."
+    - CTSCustIDList: "5001,5002,5003,..."
+    - CustIDList: "user1,user2,user3,..."
+    - LicCustList: "lic1,lic2,..."
+    - SportType: 1 (Soccer)
+end note
+
+if (matchMonitorRule != null AND MaxSequenceID.HasValue?) then (yes)
+    :Group Matches by Key;
+    note right
+        matchMonitorRule.MatchStagingList
+            .GroupBy(x => new { 
+                x.MatchID, 
+                x.ScoreDiff, 
+                x.BettypeID, 
+                x.BetID, 
+                x.Betteam 
+            })
+            .Select(y => new MatchStagingRuleGroupBettingGroupModel {
+                MatchID = y.Key.MatchID,
+                ScoreDiff = y.Key.ScoreDiff,
+                BettypeID = y.Key.BettypeID,
+                BetID = y.Key.BetID,
+                Betteam = y.Key.Betteam,
+                MatchGroupStagingList = y.ToList()
+            });
+        
+        This groups all bets with same characteristics together
+    end note
+    
+    :Parallel Processing Setup;
+    note right
+        MatchStagingList
+            .AsParallel()
+            .WithDegreeOfParallelism(numberOfThread)
+            .ForAll(matchInfo => { ... });
+        
+        Example with numberOfThread=4:
+        - Thread 1: Process Matches 1, 5, 9, 13, ...
+        - Thread 2: Process Matches 2, 6, 10, 14, ...
+        - Thread 3: Process Matches 3, 7, 11, 15, ...
+        - Thread 4: Process Matches 4, 8, 12, 16, ...
+    end note
+    
+    partition "Process Single Match (Per Thread)" {
+        :Get Process Service Instance;
+        note right
+            _ruleGBService.GetInstanceProcessGroupBettingService()
+            
+            Returns: MatchMonitorRuleGroupBettingProcessService
+            (New instance per match for thread safety)
+        end note
+        
+        :PrepareProcess(matchInfo, isLive, assDetectSetting);
+        note right
+            Initialize processing state:
+            - MatchStaging = matchInfo
+            - IsLive = isLive
+            - AssDetectSetting = assDetectSetting
+            - MatchProcesses = new List<MatchProcessRuleGroupBettingModel>()
+        end note
+        
+        partition "=== ROUND 1: Initial Detection ===" {
+            :ProcessRound1();
+            
+            :Loop Through MatchGroupStagingList;
+            note right
+                For each customer group in this match:
+                MatchStaging.MatchGroupStagingList.Select(matchInfo => ...)
+            end note
+            
+            repeat :Get Next Customer Group;
+                :Extract Customer Lists;
+                note right
+                    From matchInfo:
+                    - CTSCustIDList: "5001,5002,5003,5004,5005"
+                    - CustIDList: "user1,user2,user3,user4,user5"
+                    - LicCustList: "lic1,lic2,lic3"
+                    - SportType: 1 (Soccer)
+                end note
+                
+                :DetectAssociation();
+                note right
+                    Create DetectAssociationParamModel:
+                    - CTSCustIds = "5001,5002,5003,5004,5005"
+                    - CustIds = "user1,user2,user3,user4,user5"
+                    - IsDevice = AssDetectSetting.DeviceSports.Contains(SportType)
+                        → SportType=1, DeviceSports={1,2,3,4,5}
+                        → IsDevice = true
+                    - IsAI = AssDetectSetting.AISports.Contains(SportType)
+                        → IsAI = true
+                    - IsIP = AssDetectSetting.IPSports.Contains(SportType)
+                        → IsIP = true
+                    - Is3MatchesLast7Days = 
+                        AssDetectSetting._3MatchesLast7DaysSports.Contains(SportType)
+                        → Is3MatchesLast7Days = true
+                    - IsIPLast3Days = 
+                        AssDetectSetting.IPLast3DaysSports.Contains(SportType)
+                        → IsIPLast3Days = true
+                    - CustIdsIPLast3Days = "lic1,lic2,lic3"
+                    
+                    Call: _associationDetection.DetectAssociationLv1(param)
+                end note
+                
+                :Association Detection Service;
+                note right
+                    Database: CTS_DataCenter (MySQL)
+                    SP: CTS_AssociationDetection_Lv1
+                    
+                    Logic:
+                    1. Parse CustID lists
+                    2. Check Device associations (if IsDevice=true)
+                    3. Check AI pattern (if IsAI=true)
+                    4. Check IP associations (if IsIP=true)
+                    5. Check 3 matches in 7 days (if enabled)
+                    6. Check IP in last 3 days (if enabled)
+                    7. Merge results and assign GroupID
+                    
+                    Returns: DetectAssociationMergeGroupLv1Entity[]
+                    Example:
+                    [
+                        { CustID: "user1", GroupID: 1, AssociationType: "Device" },
+                        { CustID: "user2", GroupID: 1, AssociationType: "Device" },
+                        { CustID: "user3", GroupID: 1, AssociationType: "Device" },
+                        { CustID: "user4", GroupID: 2, AssociationType: "IP" },
+                        { CustID: "user5", GroupID: 2, AssociationType: "IP" }
+                    ]
+                end note
+                
+                :Filter: Where GroupID.HasValue;
+                
+                if (Has Associations with GroupID?) then (yes)
+                    :ProcessRuleGroupBetting();
+                    note right
+                        Call SP: CTS_MatchMonitor_RuleGroupBetting_Process
+                        
+                        Input:
+                        - isLive = true
+                        - matchInfo (MatchID, BetID, etc.)
+                        - sequenceIDList = "12345679,12345680,12345681,..."
+                        - groupDetection = JSON of associations
+                        
+                        Returns: MatchProcessRuleGroupBettingModel
+                        - CompleteMatches[] (fraud tickets to save)
+                        - ReprocessMatches[] (need Round 2 processing)
+                    end note
+                    
+                    :Add to MatchProcesses[];
+                    note right
+                        MatchProcesses.Add(result)
+                        
+                        This list accumulates all processed results
+                        from Round 1 for this match
+                    end note
+                else (no)
+                    :Skip (no association found);
+                endif
+                
+            repeat while (More customer groups?) is (yes)
+            ->no;
+            
+            :Round 1 Complete;
+            note right
+                MatchProcesses[] now contains:
+                - All successfully detected associations
+                - Some may need reprocessing (ReprocessMatches)
+            end note
+        }
+        
+        partition "=== ROUND 2: Re-processing ===" {
+            :ProcessRound2();
+            
+            if (MatchProcesses.IsNotNullOrEmpty()?) then (yes)
+                :Loop Through Round 1 Results;
+                note right
+                    MatchProcesses.SelectMany(matchProcessRound1 => 
+                        matchProcessRound1.ReprocessMatches.Select(...)
+                    )
+                    
+                    For each result from Round 1 that has ReprocessMatches
+                end note
+                
+                repeat :Get Next Reprocess Item;
+                    :Extract Refined Customer Lists;
+                    note right
+                        From reprocessInfoRound2:
+                        - CTSCustIDList (refined/subset)
+                        - CustIDList (refined/subset)
+                        - LicCustList (refined/subset)
+                        
+                        These are typically smaller groups or
+                        unresolved customers from Round 1
+                    end note
+                    
+                    :DetectAssociation (Again);
+                    note right
+                        Same logic as Round 1, but with:
+                        - Refined customer lists
+                        - Potentially different criteria
+                        - More focused detection
+                    end note
+                    
+                    :Association Detection Service;
+                    note right
+                        Call: _associationDetection.DetectAssociationLv1(param)
+                        
+                        With refined CustID lists
+                        May find additional associations
+                    end note
+                    
+                    :Filter: Where GroupID.HasValue;
+                    
+                    if (Has Associations with GroupID?) then (yes)
+                        :ProcessRuleGroupBetting();
+                        note right
+                            Same SP call as Round 1
+                            But with refined customer lists
+                        end note
+                        
+                        :Set RoundNumber = 2;
+                        note right
+                            Mark this result as from Round 2
+                            matchProcessRound2.RoundNumber = 2
+                        end note
+                        
+                        :Add to MatchProcesses[];
+                        note right
+                            Append Round 2 results to existing list
+                            
+                            MatchProcesses[] now contains:
+                            - Round 1 results
+                            - Round 2 results (marked with RoundNumber=2)
+                        end note
+                    else (no)
+                        :Skip (still no association);
+                    endif
+                    
+                repeat while (More reprocess items?) is (yes)
+                ->no;
+                
+            else (no)
+                :Skip Round 2 (no reprocess needed);
+            endif
+            
+            :Round 2 Complete;
+            note right
+                Why Round 2?
+                
+                Reasons for reprocessing:
+                1. Complex associations not found in Round 1
+                2. Subset groups that need refinement
+                3. Edge cases requiring second pass
+                4. Ensuring no fraud patterns are missed
+                
+                Benefits:
+                - Higher detection accuracy
+                - Catches complex patterns
+                - Reduces false negatives
+            end note
+        }
+        
+        partition "=== COMPLETE: Save Results ===" {
+            :Complete(maxSequenceID);
+            
+            :Merge Round 1 & Round 2 Results;
+            note right
+                var mergeMatchComplete = MatchProcesses?
+                    .Where(x => x.CompleteMatches.IsNotNullOrEmpty())
+                    .SelectMany(x => x.CompleteMatches)
+                    .GroupBy(item => item.TransIDList)
+                    .Select((group, index) => {
+                        var result = group.First();
+                        result.GroupId = index + 1;  // Sequential GroupID
+                        return result;
+                    });
+                
+                Logic:
+                1. Get all CompleteMatches from both rounds
+                2. Group by TransIDList (remove duplicates)
+                3. Assign sequential GroupID (1, 2, 3, ...)
+                4. Take first item from each group
+            end note
+            
+            if (mergeMatchComplete.IsNotNullOrEmpty()?) then (yes)
+                :Create Complete Parameter;
+                note right
+                    var para = new MatchCompleteRuleGroupBettingParameterModel {
+                        IsLive = IsLive,
+                        MatchInfo = MatchStaging,
+                        MaxSequenceID = maxSequenceID,
+                        TransGroupJson = JsonConvert.SerializeObject(mergeMatchComplete)
+                    };
+                    
+                    TransGroupJson example:
+                    [
+                        {
+                            "GroupId": 1,
+                            "TransIDList": "12345679,12345680,12345681",
+                            "CustIDList": "user1,user2,user3",
+                            "AssociationType": "Device",
+                            "TotalAmount": 300.00,
+                            "TotalOdds": 5.85,
+                            ...
+                        },
+                        {
+                            "GroupId": 2,
+                            "TransIDList": "12345682,12345683",
+                            "CustIDList": "user4,user5",
+                            "AssociationType": "IP",
+                            "TotalAmount": 200.00,
+                            ...
+                        }
+                    ]
+                end note
+                
+                :CompleteTransRuleGroupBetting(para);
+                
+                :Database Operations;
+                note right
+                    Database: CTS_DataCenter (MySQL)
+                    SP: CTS_MatchMonitor_RuleGroupBetting_Complete
+                    
+                    Step 1: Insert Results
+                    INSERT INTO CTSMatchMonitorRuleGroupBetting (
+                        MatchID, GroupID, TransIDList, CustIDList,
+                        AssociationType, TotalAmount, TotalOdds,
+                        DetectionType, RuleScore, CreatedDate
+                    )
+                    SELECT 
+                        @MatchID, GroupId, TransIDList, CustIDList,
+                        AssociationType, TotalAmount, TotalOdds,
+                        'GroupBetting', CalculateScore(...), NOW()
+                    FROM JSON_TABLE(@TransGroupJson, '$[*]'
+                        COLUMNS (
+                            GroupId INT PATH '$.GroupId',
+                            TransIDList TEXT PATH '$.TransIDList',
+                            CustIDList TEXT PATH '$.CustIDList',
+                            ...
+                        )
+                    ) AS jt;
+                    
+                    Step 2: Mark Transactions as Processed
+                    UPDATE CTSMatchMonitorStaging
+                    SET IsProcessed = 1,
+                        ProcessedDate = NOW()
+                    WHERE SequenceID IN (
+                        SELECT SequenceID
+                        FROM ... (parse from TransGroupJson)
+                    );
+                end note
+                
+            else (no)
+                :No results to save;
+            endif
+        }
+        
+        :WriteLogSentryIfError();
+        note right
+            Check for errors:
+            - Round 2 items still with ReprocessMatches
+            - Unresolved associations
+            - Processing failures
+            
+            Log to Sentry if found:
+            Utilities.LogSentryInfo(
+                ServiceName, 
+                "ProcessRuleGroupBetting Error", 
+                matchProcessNotValid, 
+                true
+            )
+        end note
+        
+        :Sleep(MatchMonitor_SleepTimes);
+        note right
+            Thread.Sleep(MatchMonitor_SleepTimes)
+            
+            Small delay between matches to:
+            - Prevent database overload
+            - Allow other processes to run
+            - Typical: 100ms
+        end note
+    }
+    
+    :Wait for All Threads to Complete;
+    note right
+        Parallel.ForAll blocks until all threads finish
+        All matches processed
+    end note
+    
+    :CleanTransRuleGroupBetting(isLive, maxSequenceID);
+    note right
+        Database: CTS_DataCenter (MySQL)
+        SP: CTS_MatchMonitor_RuleGroupBetting_Clean
+        
+        DELETE FROM CTSMatchMonitorStaging
+        WHERE IsLive = @IsLive
+            AND PoolType = 1
+            AND IsProcessed = 1
+            AND SequenceID <= @MaxSequenceID
+            AND ProcessedDate < DATE_SUB(NOW(), INTERVAL 7 DAY);
+        
+        Clean up old processed transactions
+        Keep 7 days for audit
+    end note
+    
+else (no)
+    :No matches to process;
+endif
+
+:Return Success;
+
+stop
+
+note right
+    ===================================================
+    PROCESSING PHASE COMPLETE
+    ===================================================
+    
+    Result:
+    - Fraud patterns detected
+    - Groups identified and saved
+    - Transactions marked as processed
+    - Old data cleaned up
+    
+    Output Table:
+    - CTSMatchMonitorRuleGroupBetting
+        Columns:
+        - MatchID (match identifier)
+        - GroupID (fraud group number)
+        - TransIDList (comma-separated transaction IDs)
+        - CustIDList (comma-separated customer IDs)
+        - AssociationType (Device, IP, AI, etc.)
+        - TotalAmount (total bet amount in group)
+        - TotalOdds (combined odds)
+        - DetectionType ("GroupBetting")
+        - RuleScore (fraud score)
+        - CreatedDate
+    
+    Updated Table:
+    - CTSMatchMonitorStaging
+        - IsProcessed = 1 (for processed transactions)
+        - ProcessedDate = NOW()
+    
+    Performance Notes:
+    - Parallel processing: Multiple matches simultaneously
+    - 2-round detection: Ensures high accuracy
+    - Thread count: Configurable (typically 4)
+    - Association criteria: Sport-specific
+    - Sleep time: 100ms between matches (prevent overload)
+end note
+
+@enduml
+

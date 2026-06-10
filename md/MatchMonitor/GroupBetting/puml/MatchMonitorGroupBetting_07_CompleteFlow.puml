@@ -1,0 +1,615 @@
+@startuml MatchMonitorGroupBetting_CompleteFlow
+!theme plain
+title Match Monitor Group Betting - Complete & Clean Flow
+
+start
+
+:Processing Complete (Round 1 & 2);
+note right
+    MatchProcesses[] contains all results:
+    - Round 1 results
+    - Round 2 results (if any)
+    
+    Each item in MatchProcesses:
+    - MatchInfo (match details)
+    - RoundNumber (1 or 2)
+    - CompleteMatches[] (fraud groups found)
+    - ReprocessMatches[] (items for next round)
+end note
+
+partition "=== MERGE RESULTS ===" {
+    :Extract Complete Matches;
+    note right
+        var mergeMatchComplete = MatchProcesses?
+            .Where(x => x.CompleteMatches.IsNotNullOrEmpty())
+            .SelectMany(x => x.CompleteMatches)
+        
+        This gets all CompleteMatches from:
+        - All Round 1 results
+        - All Round 2 results
+        
+        Flattens nested structure to single list
+    end note
+    
+    :Group By TransIDList;
+    note right
+        .GroupBy(item => item.TransIDList)
+        
+        Purpose: Remove duplicates
+        
+        Example:
+        Round 1: TransIDList = "101,102,103"
+        Round 2: TransIDList = "101,102,103" (same group)
+        → Group them together, keep only one
+        
+        Why duplicates?
+        - Same fraud pattern found in both rounds
+        - Overlapping detection
+        - Refinement resulted in same group
+    end note
+    
+    :Assign Sequential GroupID;
+    note right
+        .Select((group, index) => {
+            var result = group.First();  // Take first from group
+            result.GroupId = index + 1;  // Assign 1, 2, 3, ...
+            return result;
+        })
+        
+        Example:
+        Group 1: TransIDList="101,102,103" → GroupID = 1
+        Group 2: TransIDList="104,105" → GroupID = 2
+        Group 3: TransIDList="106,107,108,109" → GroupID = 3
+        
+        Benefits:
+        - Clean, sequential IDs
+        - Easy to understand
+        - No gaps in sequence
+    end note
+    
+    :Merged Results Ready;
+    note right
+        Structure: IEnumerable<MatchCompleteRuleGroupBettingEntity>
+        
+        Example:
+        [
+            {
+                GroupId: 1,
+                TransIDList: "101,102,103",
+                CustIDList: "user1,user2,user3",
+                AssociationType: "Device",
+                TotalAmount: 300.00,
+                TotalOdds: 5.85,
+                TicketCount: 3,
+                CustCount: 3
+            },
+            {
+                GroupId: 2,
+                TransIDList: "104,105",
+                CustIDList: "user4,user5",
+                AssociationType: "IP,3Matches",
+                TotalAmount: 200.00,
+                TotalOdds: 4.10,
+                TicketCount: 2,
+                CustCount: 2
+            },
+            ...
+        ]
+    end note
+}
+
+if (mergeMatchComplete.IsNotNullOrEmpty()?) then (yes)
+
+    partition "=== CREATE COMPLETE PARAMETER ===" {
+        :Build MatchCompleteRuleGroupBettingParameterModel;
+        note right
+            var para = new MatchCompleteRuleGroupBettingParameterModel
+            {
+                IsLive = IsLive,
+                MatchInfo = MatchStaging,
+                MaxSequenceID = maxSequenceID,
+                TransGroupJson = JsonConvert.SerializeObject(mergeMatchComplete)
+            };
+            
+            Fields:
+            -------
+            IsLive: true/false (Live or Non-Live)
+            
+            MatchInfo: {
+                MatchID: 987654,
+                ScoreDiff: "0-0",
+                BettypeID: 1,
+                BetID: "AH-0.5",
+                Betteam: "H",
+                SportType: 1
+            }
+            
+            MaxSequenceID: 12346678
+            
+            TransGroupJson: JSON string of merged groups
+            (See merged results structure above)
+        end note
+        
+        :Parameter Model Ready;
+    }
+    
+    partition "=== CALL COMPLETE SP ===" {
+        :CompleteTransRuleGroupBetting(para);
+        
+        :Database SP Execution;
+        note right
+            Database: CTS_DataCenter (MySQL)
+            SP: CTS_MatchMonitor_RuleGroupBetting_Complete
+            
+            Input Parameters:
+            -----------------
+            @IsLive = 1
+            @MatchInfo = '{
+                "MatchID": 987654,
+                "ScoreDiff": "0-0",
+                "BettypeID": 1,
+                ...
+            }'
+            @MaxSequenceID = 12346678
+            @TransGroupJson = '[
+                {
+                    "GroupId": 1,
+                    "TransIDList": "101,102,103",
+                    ...
+                },
+                ...
+            ]'
+        end note
+        
+        partition "SP Logic" {
+            :Parse Input JSON;
+            note right
+                -- Parse MatchInfo
+                SELECT @MatchID = JSON_VALUE(@MatchInfo, '$.MatchID');
+                SELECT @ScoreDiff = JSON_VALUE(@MatchInfo, '$.ScoreDiff');
+                SELECT @BettypeID = JSON_VALUE(@MatchInfo, '$.BettypeID');
+                ... etc
+                
+                -- Parse TransGroupJson into temp table
+                CREATE TEMPORARY TABLE TempCompleteGroups AS
+                SELECT 
+                    GroupId,
+                    TransIDList,
+                    CustIDList,
+                    AssociationType,
+                    TotalAmount,
+                    TotalOdds,
+                    TicketCount,
+                    CustCount
+                FROM JSON_TABLE(@TransGroupJson, '$[*]'
+                    COLUMNS (
+                        GroupId INT PATH '$.GroupId',
+                        TransIDList TEXT PATH '$.TransIDList',
+                        CustIDList TEXT PATH '$.CustIDList',
+                        AssociationType VARCHAR(100) PATH '$.AssociationType',
+                        TotalAmount DECIMAL(18,2) PATH '$.TotalAmount',
+                        TotalOdds DECIMAL(10,3) PATH '$.TotalOdds',
+                        TicketCount INT PATH '$.TicketCount',
+                        CustCount INT PATH '$.CustCount'
+                    )
+                ) AS jt;
+            end note
+            
+            :Calculate Rule Scores;
+            note right
+                -- Calculate fraud score for each group
+                ALTER TABLE TempCompleteGroups 
+                ADD COLUMN RuleScore DECIMAL(10,4);
+                
+                UPDATE TempCompleteGroups
+                SET RuleScore = CalculateRuleScore(
+                    TotalAmount,
+                    TotalOdds,
+                    CustCount,
+                    TicketCount,
+                    AssociationType
+                );
+                
+                CalculateRuleScore() Logic:
+                --------------------------
+                Base Score = 50
+                + Amount Factor: (TotalAmount / 1000) * 10
+                + Customer Factor: CustCount * 5
+                + Odds Factor: (TotalOdds - 2.0) * 3
+                + Association Type Bonus:
+                  - "Device": +20
+                  - "Device,IP": +30
+                  - "Device,IP,3Matches": +40
+                  - "AI": +25
+                
+                Max Score = 100
+                Min Score = 0
+                
+                High Score = High Fraud Probability
+            end note
+            
+            :Insert Results;
+            note right
+                INSERT INTO CTSMatchMonitorRuleGroupBetting (
+                    MatchID,
+                    GroupID,
+                    TransIDList,
+                    CustIDList,
+                    AssociationType,
+                    TotalAmount,
+                    TotalOdds,
+                    TicketCount,
+                    CustCount,
+                    DetectionType,
+                    RuleScore,
+                    BettypeID,
+                    BetID,
+                    Betteam,
+                    ScoreDiff,
+                    SportType,
+                    IsLive,
+                    CreatedDate,
+                    ModifiedDate
+                )
+                SELECT 
+                    @MatchID,
+                    t.GroupId,
+                    t.TransIDList,
+                    t.CustIDList,
+                    t.AssociationType,
+                    t.TotalAmount,
+                    t.TotalOdds,
+                    t.TicketCount,
+                    t.CustCount,
+                    'GroupBetting' AS DetectionType,
+                    t.RuleScore,
+                    @BettypeID,
+                    @BetID,
+                    @Betteam,
+                    @ScoreDiff,
+                    @SportType,
+                    @IsLive,
+                    NOW(),
+                    NOW()
+                FROM TempCompleteGroups t;
+                
+                Table: CTSMatchMonitorRuleGroupBetting
+                Primary Key: ID (auto-increment)
+                Unique Index: (MatchID, GroupID, IsLive)
+            end note
+            
+            :Mark Transactions as Processed;
+            note right
+                -- Extract all SequenceIDs from TransIDList
+                CREATE TEMPORARY TABLE TempSequenceIDs AS
+                SELECT DISTINCT SequenceID
+                FROM CTSMatchMonitorStaging
+                WHERE FIND_IN_SET(
+                    SequenceID, 
+                    (SELECT GROUP_CONCAT(TransIDList) 
+                     FROM TempCompleteGroups)
+                );
+                
+                -- Update staging table
+                UPDATE CTSMatchMonitorStaging
+                SET IsProcessed = 1,
+                    ProcessedDate = NOW(),
+                    ProcessedBy = 'RuleGroupBetting'
+                WHERE SequenceID IN (
+                    SELECT SequenceID FROM TempSequenceIDs
+                );
+                
+                -- Get affected row count
+                SELECT ROW_COUNT() AS ProcessedCount;
+            end note
+            
+            :Create Audit Log;
+            note right
+                -- Insert audit record
+                INSERT INTO CTSMatchMonitorAuditLog (
+                    MatchID,
+                    RuleType,
+                    ProcessedCount,
+                    GroupCount,
+                    TotalAmount,
+                    MaxSequenceID,
+                    IsLive,
+                    ProcessDate,
+                    ProcessDuration
+                )
+                VALUES (
+                    @MatchID,
+                    'GroupBetting',
+                    (SELECT COUNT(*) FROM TempSequenceIDs),
+                    (SELECT COUNT(*) FROM TempCompleteGroups),
+                    (SELECT SUM(TotalAmount) FROM TempCompleteGroups),
+                    @MaxSequenceID,
+                    @IsLive,
+                    NOW(),
+                    TIMESTAMPDIFF(MILLISECOND, @StartTime, NOW())
+                );
+            end note
+            
+            :Clean Up Temp Tables;
+            note right
+                DROP TEMPORARY TABLE IF EXISTS TempCompleteGroups;
+                DROP TEMPORARY TABLE IF EXISTS TempSequenceIDs;
+            end note
+            
+            :Return Success;
+            note right
+                SELECT 
+                    'Success' AS Status,
+                    @MatchID AS MatchID,
+                    (SELECT COUNT(*) FROM ...) AS GroupCount,
+                    (SELECT COUNT(*) FROM ...) AS ProcessedTickets
+            end note
+        }
+        
+        :SP Execution Complete;
+    }
+    
+else (no)
+    :No Results to Save;
+    note right
+        This can happen if:
+        - No associations detected
+        - All associations filtered out
+        - Round 1 & 2 found nothing
+        
+        Not an error, just no fraud found
+    end note
+endif
+
+partition "=== WRITE LOG ===" {
+    :WriteLogSentryIfError("ProcessRuleGroupBetting");
+    
+    :Check for Errors;
+    note right
+        Check MatchProcesses for issues:
+        
+        var matchProcessNotValid = MatchProcesses
+            .Where(x => x.RoundNumber == 2 
+                     && x.ReprocessMatches.IsNotNullOrEmpty());
+        
+        This identifies:
+        - Round 2 items that still need reprocessing
+        - Unresolved associations
+        - Potential infinite loop
+    end note
+    
+    if (Has Errors?) then (yes)
+        :Log to Sentry;
+        note right
+            Utilities.LogSentryInfo(
+                ServiceName: "Match Monitor Process Rule GroupBetting Service",
+                FunctionName: "ProcessRuleGroupBetting Error",
+                Data: matchProcessNotValid,
+                IsError: true
+            );
+            
+            Logged Information:
+            - MatchID
+            - RoundNumber = 2
+            - ReprocessMatches (what still needs processing)
+            - Original MatchInfo
+            - Association detection results
+            
+            Purpose:
+            - Debugging
+            - Identify patterns needing improvement
+            - Alert for manual review
+        end note
+    else (no)
+        :No Errors;
+    endif
+}
+
+partition "=== SLEEP ===" {
+    :Thread.Sleep(MatchMonitor_SleepTimes);
+    note right
+        Sleep Duration: 100ms (typical)
+        
+        Purpose:
+        - Prevent database overload
+        - Allow other processes CPU time
+        - Throttle processing rate
+        - Maintain system stability
+        
+        Trade-off:
+        - Slower total processing time
+        - But better resource utilization
+        - Prevents deadlocks
+        - Allows concurrent operations
+    end note
+}
+
+:Match Processing Complete;
+
+note right
+    ================================================
+    COMPLETE FLOW END (Per Match)
+    ================================================
+    
+    This flow runs for EACH match in parallel
+    Example with 50 matches and 4 threads:
+    - Thread 1: Processes 13 matches sequentially
+    - Thread 2: Processes 13 matches sequentially
+    - Thread 3: Processes 12 matches sequentially
+    - Thread 4: Processes 12 matches sequentially
+    
+    All 50 matches complete → Continue to Clean phase
+end note
+
+note right : ALL MATCHES COMPLETE
+
+partition "=== CLEAN UP OLD DATA ===" {
+    :CleanTransRuleGroupBetting(isLive, maxSequenceID);
+    
+    :Database SP Execution;
+    note right
+        Database: CTS_DataCenter (MySQL)
+        SP: CTS_MatchMonitor_RuleGroupBetting_Clean
+        
+        Input Parameters:
+        -----------------
+        @IsLive = 1
+        @MaxSequenceID = 12346678
+    end note
+    
+    partition "Clean SP Logic" {
+        :Calculate Retention Date;
+        note right
+            SET @RetentionDate = DATE_SUB(NOW(), INTERVAL 7 DAY);
+            
+            Keep data for 7 days:
+            - For audit purposes
+            - For investigation
+            - For data recovery
+            - For debugging
+            
+            After 7 days: Safe to delete
+        end note
+        
+        :Delete Old Processed Transactions;
+        note right
+            DELETE FROM CTSMatchMonitorStaging
+            WHERE IsLive = @IsLive
+                AND PoolType = 1  -- GroupBetting Pool only
+                AND IsProcessed = 1  -- Only processed transactions
+                AND SequenceID <= @MaxSequenceID  -- Up to current batch
+                AND ProcessedDate < @RetentionDate;  -- Older than 7 days
+            
+            Example:
+            Today: 2024-11-19
+            RetentionDate: 2024-11-12
+            Delete: Transactions processed before 2024-11-12
+            
+            Typical Delete Count: ~10,000 - 50,000 rows per run
+            
+            Performance:
+            - Uses index: idx_staging_main
+            - DELETE in batches if too many rows
+            - Minimal lock time
+        end note
+        
+        :Get Deleted Count;
+        note right
+            SELECT ROW_COUNT() AS DeletedRows;
+            
+            Returns: Number of rows deleted
+            Example: 25,437 rows deleted
+        end note
+        
+        :Log Clean Operation;
+        note right
+            INSERT INTO CTSMatchMonitorCleanLog (
+                PoolType,
+                IsLive,
+                DeletedRows,
+                MaxSequenceID,
+                RetentionDate,
+                CleanDate
+            )
+            VALUES (
+                1,  -- GroupBetting
+                @IsLive,
+                ROW_COUNT(),
+                @MaxSequenceID,
+                @RetentionDate,
+                NOW()
+            );
+        end note
+        
+        :Optimize Table (if needed);
+        note right
+            -- Only if large delete
+            IF ROW_COUNT() > 50000 THEN
+                OPTIMIZE TABLE CTSMatchMonitorStaging;
+            END IF;
+            
+            Purpose:
+            - Reclaim disk space
+            - Rebuild indexes
+            - Improve query performance
+            
+            Note: Can be slow, so only for large deletes
+        end note
+        
+        :Return Success;
+    }
+    
+    :Clean Complete;
+}
+
+:Return Success to Controller;
+
+stop
+
+note right
+    ===================================================
+    COMPLETE & CLEAN FLOW SUMMARY
+    ===================================================
+    
+    **What Happened:**
+    
+    1. ✅ Merged Round 1 & Round 2 results
+    2. ✅ Removed duplicate groups
+    3. ✅ Assigned sequential GroupIDs
+    4. ✅ Calculated fraud scores
+    5. ✅ Inserted into result table (CTSMatchMonitorRuleGroupBetting)
+    6. ✅ Marked staging transactions as processed
+    7. ✅ Created audit logs
+    8. ✅ Logged errors to Sentry (if any)
+    9. ✅ Cleaned up old processed data (7+ days)
+    10. ✅ Optimized database (if needed)
+    
+    **Key Tables Updated:**
+    
+    - CTSMatchMonitorRuleGroupBetting (INSERT)
+      → Fraud detection results
+      
+    - CTSMatchMonitorStaging (UPDATE)
+      → IsProcessed = 1, ProcessedDate = NOW()
+      
+    - CTSMatchMonitorStaging (DELETE)
+      → Old processed transactions (7+ days)
+      
+    - CTSMatchMonitorAuditLog (INSERT)
+      → Audit trail
+      
+    - CTSMatchMonitorCleanLog (INSERT)
+      → Clean operation log
+    
+    **Performance Metrics:**
+    
+    - Processing Time: ~100-500ms per match
+    - Parallel Threads: 4 (configurable)
+    - Batch Size: 1000 tickets (configurable)
+    - Sleep Time: 100ms between matches
+    - Clean Frequency: Every run
+    - Retention Period: 7 days
+    
+    **Error Handling:**
+    
+    - All errors logged to Sentry
+    - Transaction rollback on failure
+    - Retry logic for database deadlocks
+    - Graceful degradation
+    
+    **Downstream Impact:**
+    
+    - Results available for:
+      → Match Monitor Web Page
+      → Classification Jobs
+      → Reports & Analytics
+      → Investigation Tools
+      
+    - Triggers:
+      → Customer classification updates
+      → Alert notifications
+      → Report generation
+end note
+
+@enduml
+

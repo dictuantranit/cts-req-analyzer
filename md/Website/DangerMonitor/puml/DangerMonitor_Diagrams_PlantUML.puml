@@ -1,0 +1,440 @@
+@startuml DangerMonitor_MainFlow
+!theme plain
+title Danger Monitor - Main Business Flow
+
+start
+:User Opens Danger Monitor Page;
+:Load Initial Data;
+  :GetSportBettype();
+  :GetLeagueGroup();
+  :Load Filters;
+:User Sets Search Criteria;
+  :Select Danger Levels;
+  :Select Sport/Bettype;
+  :Enter Date Range;
+  if (Enter Username?) then (yes)
+    :ValidateUsername();
+    :Validate Username;
+  else (no)
+  endif
+  if (Enable Association Mode?) then (yes)
+    :Set IsRootUserAssociationMode = true;
+  else (no)
+    :Set IsRootUserAssociationMode = false;
+  endif
+:Execute Search;
+if (Association Mode?) then (yes)
+  :DetectAssociationCustByUserRoot();
+  :GetDangerMonitorWithAssociationByRootUser();
+  :Call CTS_MatchTicketInfo_Associations_Get [SP];
+else (no)
+  :GetDangerMonitorWithNoAssociation();
+  :Call CTS_MatchTicketInfo_Get [SP];
+endif
+:Display Results in Grid;
+if (User Clicks Match?) then (yes)
+  :Load Detail Page;
+    :Load Detail Filters;
+    :Call CTS_MatchMonitor_Details_GetFilter [SP];
+    :Load Detail Tickets;
+    :Call CTS_MatchMonitor_Details_GetTicket [SP];
+  if (User Actions?) then (yes)
+    if (Apply Filters?) then (yes)
+      :Reload Tickets with New Filters;
+    endif
+    if (Detect Association?) then (yes)
+      :DetectGroupAssWithOptions();
+    endif
+    if (Export Excel?) then (yes)
+      :ExportToExcelMMDetail();
+      :Generate Excel File;
+    endif
+  else (no)
+  endif
+else (no)
+endif
+stop
+
+@enduml
+
+@startuml DangerMonitor_Sequence_NoAssociation
+!theme plain
+title Danger Monitor Search - No Association Mode Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+User -> Controller: POST GetDangerMonitor(filter)
+activate Controller
+
+Controller -> Controller: Validate filter
+alt filter.Validate == true AND IsRootUserAssociationMode == false
+    Controller -> Service: GetDangerMonitorWithNoAssociation(filter)
+    activate Service
+    
+    Service -> Service: GetDangerMonitorInfoWithNoAssociation(filter)
+    Service -> Service: Create DangerMonitorSearchMatchInfoCriteria
+    note right of Service: Set parameters:\n- FromDate, ToDate\n- SportList, BettypeList\n- DangerLevels\n- UserNameList, etc.
+    
+    Service -> Repository: Fetch<DangerMMTicketInfoEntity>(criteria)
+    activate Repository
+    
+    Repository -> Repository: GetSettingKey() = "CTS_MatchTicketInfo_Get"
+    Repository -> DB: EXEC CTS_MatchTicketInfo_Get [SP]
+    activate DB
+    note right of DB: Stored Procedure:\nCTS_MatchTicketInfo_Get\n@FromDate, @ToDate\n@SportList, @BettypeList\n@DangerLevels, etc.
+    DB --> Repository: Return ResultSet
+    deactivate DB
+    
+    Repository --> Service: IEnumerable<DangerMMTicketInfoEntity>
+    deactivate Repository
+    
+    Service -> Service: Map to DangerMMTicketInfoModel
+    Service -> Service: MappingDangerMonitorWithSportBettype()
+    Service -> Service: Join with SportBettype data
+    Service --> Controller: GetDangerMonitorResultViewModel
+    deactivate Service
+    
+    Controller -> Controller: OrderDangerMonitorItems()
+    note right of Controller: Order by:\n1. MatchSection\n2. EventDate DESC\n3. MatchID DESC\n4. BettypeID\n5. BetID
+    Controller --> User: JSON Response { data: { Items: [...] } }
+else filter.Validate == false
+    Controller --> User: JSON Response { data: { Items: [] } }
+end
+deactivate Controller
+
+@enduml
+
+@startuml DangerMonitor_Sequence_WithAssociation
+!theme plain
+title Danger Monitor Search - With Association Mode Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "AssociationDetection\nService" as AssocService
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+User -> Controller: POST GetDangerMonitor(filter)\nIsRootUserAssociationMode = true
+activate Controller
+
+Controller -> Controller: DetectAssociationCustByUserRoot(filter)
+activate Controller
+
+alt ConfigSettings.IsUsingFanexAPIDirect
+    Controller -> Controller: Call API via ApiHelper
+    note right of Controller: API Endpoint:\nDetectAssociationCustByUserRoot
+else Direct Mode
+    Controller -> AssocService: DetectAssociationCustByUserRoot(filterAss)
+    activate AssocService
+    note right of AssocService: Filter:\n- UserNames\n- IsAI, IsDevice, IsIP
+    
+    AssocService -> AssocService: Validate UserNames
+    AssocService -> AssocService: Detect Association
+    note right of AssocService: Detect by:\n- Device\n- AI (Betting Pattern)\n- IP Address
+    
+    AssocService --> Controller: IEnumerable<DetectAssociationByUserRootModel>
+    deactivate AssocService
+end
+
+Controller -> Controller: JsonConvert.SerializeObject(result)
+Controller --> Controller: Return JSON string
+deactivate Controller
+
+Controller -> Service: GetDangerMonitorWithAssociationByRootUser(\n  filter,\n  associationData\n)
+activate Service
+
+Service -> Service: GetDangerMonitorInfoWithAssociationRootUser(\n  filter,\n  associationData\n)
+Service -> Service: Create DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria
+note right of Service: Set parameters:\n- FromDate, ToDate\n- SportList, BettypeList\n- AssociationsList (JSON)\n- Other filters
+
+Service -> Repository: Fetch<DangerMMTicketInfoEntity>(criteria)
+activate Repository
+
+Repository -> Repository: GetSettingKey() = "CTS_MatchTicketInfo_Associations_Get"
+Repository -> DB: EXEC CTS_MatchTicketInfo_Associations_Get [SP]
+    activate DB
+    note right of DB: Stored Procedure:\nCTS_MatchTicketInfo_Associations_Get\n@FromDate, @ToDate\n@SportList, @BettypeList\n@AssociationsList (JSON)
+    DB --> Repository: Return ResultSet
+deactivate DB
+
+Repository --> Service: IEnumerable<DangerMMTicketInfoEntity>
+deactivate Repository
+
+Service -> Service: Map to DangerMMTicketInfoModel
+Service -> Service: MappingDangerMonitorWithSportBettype()
+Service --> Controller: GetDangerMonitorResultViewModel
+deactivate Service
+
+Controller -> Controller: OrderDangerMonitorItems()
+Controller --> User: JSON Response { data: { Items: [...] } }
+deactivate Controller
+
+@enduml
+
+@startuml DangerMonitor_Sequence_DetailPage
+!theme plain
+title Danger Monitor Detail Page - Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "MatchMonitor\nService" as MMService
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+== Load Detail Page ==
+User -> Controller: GET Detail(para)
+activate Controller
+
+Controller -> Service: GetBettypesFromCache()
+Service --> Controller: Bettypes data
+
+Controller -> Controller: GetGroupCustomerClass()
+Controller -> Controller: GetReasonGroups()
+Controller -> Controller: Set ViewBag properties
+Controller --> User: Return View (Detail.cshtml)
+deactivate Controller
+
+== Load Detail Filters ==
+User -> Controller: POST GetMatchMonitorFilter(para)
+activate Controller
+
+Controller -> Controller: Set para.TicketType = Single
+Controller -> Service: GetMatchMonitorFilter(para)
+activate Service
+
+alt para.IsImportNewTicket
+    Service -> Service: GetMatchMonitorFilterImportNew(para)
+else para.TypeOfTickets == TicketFraud
+    Service -> Service: GetFraudMMFilter(para)
+else para.IsSupportShowAllTickets
+    Service -> Service: GetAllMMFilter(para)
+end
+
+Service -> MMService: GetMatchMonitorFilter(para)
+activate MMService
+
+MMService -> Repository: Fetch<MMDetailFilterEntity>(criteria)
+activate Repository
+
+Repository -> DB: EXEC CTS_MatchMonitor_Details_GetFilter [SP]
+    activate DB
+    note right of DB: Stored Procedure:\nCTS_MatchMonitor_Details_GetFilter\n@MatchID, @BettypeID, @BetID\n@ViewMode = 2 (Danger Monitor)
+    DB --> Repository: Return Filter Data
+deactivate DB
+
+Repository --> MMService: MMDetailFilterViewModel
+deactivate Repository
+
+MMService --> Service: MMDetailFilterViewModel
+deactivate MMService
+
+Service --> Controller: MMDetailFilterViewModel
+deactivate Service
+
+Controller --> User: JSON Response { data: filterData }
+deactivate Controller
+
+== Load Detail Tickets ==
+User -> Controller: POST GetMatchMonitorDetail(para, filter)
+activate Controller
+
+Controller -> Controller: Set para.TicketType = Single
+Controller -> Service: GetMatchMonitorDetail(para, filter)
+activate Service
+
+Service -> MMService: GetMatchMonitorDetail(para, filter)
+activate MMService
+
+MMService -> MMService: GetMatchMonitorDetailForCache(para, ...)
+MMService -> MMService: GetSingleTicketDetailForCache(...)
+
+MMService -> Repository: Fetch<TicketDetailEntity>(criteria)
+activate Repository
+
+Repository -> DB: EXEC CTS_MatchMonitor_Details_GetTicket [SP]
+    activate DB
+    note right of DB: Stored Procedure:\nCTS_MatchMonitor_Details_GetTicket\n@MatchID, @BettypeID, @BetID\n@QueryType = 3 (Danger Monitor)
+    DB --> Repository: Return Ticket Details
+deactivate DB
+
+Repository --> MMService: TicketDetailEntity
+deactivate Repository
+
+MMService -> MMService: Process & Transform data
+MMService --> Service: MMDetailTicketListViewModel
+deactivate MMService
+
+Service --> Controller: MMDetailTicketListViewModel
+deactivate Service
+
+Controller --> User: JSON Response { data: tickets, recordsFiltered: count }
+deactivate Controller
+
+@enduml
+
+@startuml DangerMonitor_Component_Diagram
+!theme plain
+title Danger Monitor - Component Architecture Diagram
+
+package "Presentation Layer" {
+    [DangerMonitorController] as Controller
+    [DangerMonitor Views] as Views
+    [JavaScript/UI] as JS
+}
+
+package "Business Logic Layer" {
+    [DangerMonitorService] as DMService
+    [MatchMonitorService] as MMService
+    [AssociationDetectionService] as AssocService
+    [CommonService] as CommonService
+}
+
+package "Data Access Layer" {
+    [CriteriaService] as CriteriaService
+    [DangerMonitorSearchMatchInfoCriteria] as Criteria1
+    [DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria] as Criteria2
+    [ICriteriaService] as ICriteria
+}
+
+package "Database Layer" {
+    database "SQL Server\n(WASAVerse)" {
+        [CTS_MatchTicketInfo_Get] as SP1
+        [CTS_MatchTicketInfo_Associations_Get] as SP2
+        [CTS_MatchMonitor_Details_GetFilter] as SP3
+        [CTS_MatchMonitor_Details_GetTicket] as SP4
+        [CTS_Sportbettype_Get] as SP5
+    }
+}
+
+package "External Services" {
+    [Fanex API] as API
+    [Memory Cache] as Cache
+}
+
+' Connections
+JS --> Controller : HTTP Requests
+Views --> JS : User Interactions
+Controller --> DMService : Business Logic
+Controller --> MMService : Detail Logic
+Controller --> AssocService : Association Detection
+DMService --> CommonService : Common Operations
+DMService --> MMService : Match Monitor Operations
+DMService --> Cache : Cache Operations
+DMService --> CriteriaService : Data Access
+MMService --> CriteriaService : Data Access
+CriteriaService --> ICriteria : Interface
+ICriteria --> Criteria1 : Implementation
+ICriteria --> Criteria2 : Implementation
+Criteria1 --> SP1 : Execute
+Criteria2 --> SP2 : Execute
+MMService --> SP3 : Execute
+MMService --> SP4 : Execute
+CommonService --> SP5 : Execute
+Controller --> API : API Calls (Optional)
+
+note right of SP1
+  Main Search SP
+  (No Association)
+end note
+
+note right of SP2
+  Search SP with
+  Association Data
+end note
+
+note right of SP3
+  Get Filter Options
+  for Detail Page
+end note
+
+note right of SP4
+  Get Ticket Details
+  for Detail Page
+end note
+
+@enduml
+
+@startuml DangerMonitor_DatabaseFlow
+!theme plain
+title Danger Monitor - Database Flow Diagram
+
+start
+:User Request;
+
+if (Action Type?) then (GetDangerMonitor - No Association)
+    :Create DangerMonitorSearchMatchInfoCriteria;
+    note right
+        Parameters:
+        - @FromDate
+        - @ToDate
+        - @SportList
+        - @BettypeList
+        - @DangerLevels
+        - @UserNameList
+        - @LeagueGroupList
+        - @UserAmount
+        - @TotalAmount
+    end note
+    :Execute CTS_MatchTicketInfo_Get;
+    :Process Results;
+    :Return DangerMMTicketInfoEntity[];
+    
+elseif (GetDangerMonitor - With Association) then
+    :Detect Association First;
+    :Create DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria;
+    note right
+        Parameters:
+        - @FromDate
+        - @ToDate
+        - @SportList
+        - @BettypeList
+        - @AssociationsList (JSON)
+        - Other filters
+    end note
+    :Execute CTS_MatchTicketInfo_Associations_Get;
+    :Process Results;
+    :Return DangerMMTicketInfoEntity[];
+    
+elseif (GetMatchMonitorFilter) then
+    :Create Filter Criteria;
+    note right
+        Parameters:
+        - @MatchID
+        - @BettypeID
+        - @BetID
+        - @ViewMode = 2 (Danger Monitor)
+    end note
+    :Execute CTS_MatchMonitor_Details_GetFilter;
+    :Process Filter Options;
+    :Return MMDetailFilterViewModel;
+    
+elseif (GetMatchMonitorDetail) then
+    :Create Detail Criteria;
+    note right
+        Parameters:
+        - @MatchID
+        - @BettypeID
+        - @BetID
+        - @QueryType = 3 (Danger Monitor)
+        - Filter parameters
+    end note
+    :Execute CTS_MatchMonitor_Details_GetTicket;
+    :Process Ticket Details;
+    :Return MMDetailTicketListViewModel;
+    
+else (Other Actions)
+    :Handle Other Requests;
+endif
+
+:Map to ViewModels;
+:Return to Service Layer;
+stop
+
+@enduml
+

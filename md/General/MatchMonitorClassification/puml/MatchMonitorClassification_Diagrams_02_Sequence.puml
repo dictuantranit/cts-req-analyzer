@@ -1,0 +1,236 @@
+@startuml MatchMonitorClassification_Sequence
+title Match Monitor Classification - Sequence Diagram (Classify Job)
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequenceMessageAlign center
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+
+actor "Scheduler\n(Every 5 mins)" as Scheduler
+participant "ClassificationJobController" as Controller <<HTTP>>
+participant "MatchMonitorClassification\nJobService" as JobService
+participant "MatchMonitorClassification\nService" as Service
+participant "MatchMonitorClassification\nDataAccess" as DataAccess
+participant "ProblemAccountServices" as PAService
+participant "CustClassToMainDBService" as MainDBService
+database "CTS_DataCenter\n(MySQL)" as CTS_DB
+database "bodb_VR2Model\n(SQL Server)" as Main_DB
+
+== Job Trigger ==
+
+Scheduler -> Controller: POST /api/classificationJobs/\nClassifyMatchMonitor()
+activate Controller
+
+Controller -> JobService: ClassifyMatchMonitor()
+activate JobService
+note right
+  Service Name: "Match Monitor Classication"
+  Batch Size: 500 (fixed)
+end note
+
+== Step 1: Get ONE Match & Run Detection ==
+
+JobService -> Service: ClassifyMatchMonitor()
+activate Service
+
+Service -> DataAccess: ClassifyMatchMonitor()
+activate DataAccess
+
+DataAccess -> CTS_DB: CALL CTS_DC_CustClassification_\nMatchMonitor_Classify()
+activate CTS_DB
+note right
+  **Multi-Result Set SP**:
+  
+  **ResultSet 1**: ClassifyGBMMCustInfosEntity[]
+  - CustID
+  - SportGroupID
+  - CategoryID
+  - Reason
+  
+  **ResultSet 2**: string (MMDetailIDList)
+  - Comma-separated IDs of fraud tickets
+  - Example: "123,456,789"
+  
+  **ResultSet 3**: int? (MatchID)
+  - Current match being processed
+  - NULL if no match in queue
+  
+  **Logic**:
+  1. SELECT TOP 1 match (FIFO)
+  2. Run group betting detection
+  3. Identify fraud tickets
+  4. Extract customer info
+end note
+
+CTS_DB --> DataAccess: Return 3 ResultSets
+deactivate CTS_DB
+
+DataAccess -> DataAccess: Parse ResultSets
+note right
+  **Parse into Model**:
+  - CustInfos = ResultSet 1
+  - MMDetailIDList = ResultSet 2.FirstOrDefault()
+  - MatchID = ResultSet 3.FirstOrDefault()
+end note
+
+DataAccess --> Service: ClassifyGBMatchMonitorModel
+deactivate DataAccess
+note right
+  **Model Contains**:
+  - CustInfos[]
+  - MMDetailIDList (string)
+  - MatchID (int?)
+end note
+
+Service --> JobService: Return Model
+deactivate Service
+
+== Step 2: Insert Problem Account (If Has CustInfos) ==
+
+alt Has CustInfos?
+    
+    JobService -> JobService: Convert to InsertProblemAccountEntity[]
+    note right
+      **Mapping**:
+      - From: ClassifyGBMMCustInfosEntity
+      - To: InsertProblemAccountEntity
+      
+      **Constructor auto-maps**:
+      - CustID, SportGroupID
+      - CategoryID, Reason, etc.
+    end note
+    
+    JobService -> Service: InsertProblemAccount(entities, config)
+    activate Service
+    note right
+      **Config**:
+      - RoleGroup: Member
+      - ExternalBatchSize: 500
+      - IsUpdateDangerToMainDB: true
+      - IsWriteLog: true
+      - ServiceName: "Match Monitor Classication"
+    end note
+    
+    Service -> PAService: InsertProblemAccountPackage(\npas, FunctionId, CCInputFlow, ...)
+    activate PAService
+    note right
+      **Inherited from ProblemAccountServices**
+      
+      **Parameters**:
+      - FunctionId: ClassifyGBMatchMonitor
+      - CCInputFlow: InsertPACategory
+      - IsLogData: false
+      - ServiceName: "Match Monitor Classication"
+    end note
+    
+    PAService -> CTS_DB: INSERT/UPDATE CTSCustomerClassification
+    activate CTS_DB
+    note right
+      **Insert Problem Account**:
+      1. Validate CustIDs
+      2. Check existing classification
+      3. Insert/Update CC record
+      4. Set CategoryID (CC type)
+      5. Mark as PA (IsPA = 1)
+      6. Update LastModifiedDate
+    end note
+    
+    CTS_DB --> PAService: Inserted CustIDs[]
+    deactivate CTS_DB
+    
+    PAService --> Service: Return CustIDs[]
+    deactivate PAService
+    
+    == Step 3: Push to MainDB ==
+    
+    Service -> MainDBService: PushExternalProblemAcountPackage(\nCustIDs, config)
+    activate MainDBService
+    note right
+      **External Push Process**:
+      1. Distinct CustIDs
+      2. Batch by ExternalBatchSize (500)
+      3. Push each batch to MainDB
+    end note
+    
+    loop For each batch (500 CustIDs)
+        MainDBService -> Main_DB: PUSH Customer Classification
+        activate Main_DB
+        note right
+          **Sync to External System**:
+          - Update customer CC status
+          - Update PA flag
+          - Update category info
+        end note
+        
+        Main_DB --> MainDBService: Success/Failure
+        deactivate Main_DB
+    end
+    
+    MainDBService --> Service: Push Complete
+    deactivate MainDBService
+    
+    Service --> JobService: Return true
+    deactivate Service
+    
+end
+
+== Step 4: Mark Match as Completed ==
+
+JobService -> Service: ClassifyMatchMonitorCompleted(model)
+activate Service
+
+alt Has MatchID?
+    
+    Service -> DataAccess: ClassifyMatchMonitorCompleted(\nmatchID, mmDetailIDs)
+    activate DataAccess
+    
+    DataAccess -> CTS_DB: CALL CTS_DC_CustClassification_\nMatchMonitor_Completed(\nip_MatchID, ip_MMDetailsIDList)
+    activate CTS_DB
+    note right
+      **Mark as Processed**:
+      
+      **Input**:
+      - ip_MatchID: Current match
+      - ip_MMDetailsIDList: "123,456,789"
+      
+      **Update**:
+      UPDATE CTSMatchMonitorDetail
+      SET IsProcessed = 1
+      WHERE ID IN (parse ip_MMDetailsIDList)
+        AND MatchID = ip_MatchID
+      
+      **Purpose**:
+      - Remove from queue
+      - Prevent reprocessing
+      - Track completion
+    end note
+    
+    CTS_DB --> DataAccess: Success
+    deactivate CTS_DB
+    
+    DataAccess --> Service: Complete
+    deactivate DataAccess
+    
+end
+
+Service --> JobService: Complete
+deactivate Service
+
+== Job Complete ==
+
+JobService --> Controller: Return true
+deactivate JobService
+
+Controller --> Scheduler: 200 OK (Success)
+deactivate Controller
+
+note over Scheduler
+  **Next Run (5 minutes later)**:
+  - Will pick next match in queue
+  - FIFO order maintained
+  - Process ONE match at a time
+end note
+
+@enduml
+

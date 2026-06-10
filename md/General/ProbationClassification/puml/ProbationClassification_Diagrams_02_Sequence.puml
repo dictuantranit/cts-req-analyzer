@@ -1,0 +1,229 @@
+@startuml ProbationClassification_Sequence
+title Probation Classification - Sequence Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequence {
+  ArrowColor Black
+  ActorBorderColor Black
+  LifeLineBorderColor Black
+  LifeLineBackgroundColor White
+  
+  ParticipantBorderColor Black
+  ParticipantBackgroundColor White
+  ParticipantFontSize 12
+  
+  BoxBorderColor Black
+  BoxBackgroundColor #F0F0F0
+}
+
+actor Scheduler as scheduler
+participant "ClassificationJob\nController" as controller
+participant "ProbationClassification\nJobService" as jobService
+participant "ProbationClassification\nServices" as service
+participant "ProbationClassification\nDataAccess" as dataAccess
+participant "SystemParameter\nDataAccess" as sysParamAccess
+database "CTS_DataCenter\n(MySQL)" as mysql
+database "bodb_VR2Model\n(SQL Server)" as sqlserver
+
+scheduler -> controller : POST /scanningProbationClassification
+activate controller
+controller -> jobService : Execute(batchSize)
+activate jobService
+
+jobService -> jobService : Validate batchSize > 0
+jobService -> jobService : JobRun(batchSize)
+
+== Do-While Loop Start ==
+note over jobService
+  Pagination loop using system parameters
+  Continue until all probation customers processed
+end note
+
+loop Do-While (isContinue = true)
+  
+  == Step 1: Initialize ==
+  jobService -> service : Start()
+  activate service
+  service -> service : Initialize ProbationModel
+  service --> jobService : this
+  deactivate service
+
+  == Step 2: Get Probation Customers ==
+  jobService -> service : GetProbationCustForScanning(batchSize)
+  activate service
+  
+  service -> dataAccess : GetProbationCustForScanning(batchSize)
+  activate dataAccess
+  
+  dataAccess -> mysql : CTS_DC_CustClassification_ProbationScan_Get\n(ip_NoOfRecord, op_LastCustID, op_LastCategoryID)
+  activate mysql
+  note right
+    **Input**: ip_NoOfRecord = batchSize
+    **Output Parameters**:
+    - op_LastCustID (last processed)
+    - op_LastCategoryID (last processed)
+    
+    **Query Logic**:
+    - Get from CTSCustomerClassification
+    - WHERE ProbationEndDate > NOW()
+    - AND CustID > @LastCustID (from system params)
+    - ORDER BY CustID, CategoryID
+    - LIMIT @ip_NoOfRecord
+  end note
+  mysql --> dataAccess : ProbationEntity[] + LastCustID + LastCategoryID
+  deactivate mysql
+  
+  dataAccess -> dataAccess : Build ProbationModel\n(CustProbations, LastCustID, LastCategoryID)
+  dataAccess --> service : ProbationModel
+  deactivate dataAccess
+  
+  service -> service : Store probationModel
+  service --> jobService : this
+  deactivate service
+
+  == Step 3: Re-Classify Probation Customers ==
+  jobService -> service : ClassifyProbation()
+  activate service
+  
+  alt If probationModel.CustProbations.Any()
+    service -> service : Convert CustIDs to comma-separated string
+    note right
+      **String Format**:
+      "123456,789012,345678,901234"
+    end note
+    
+    service -> dataAccess : ClassifyProbation(custToString)
+    activate dataAccess
+    
+    dataAccess -> sqlserver : CTS_GeneralNormalClassification_Probation_Preprocess\n(custList)
+    activate sqlserver
+    note right
+      **Purpose**: Re-classify probation customers
+      **Input**: Comma-separated CustIDs
+      **Timeout**: 300 seconds (5 minutes)
+      
+      **Re-Classification Logic**:
+      1. Get performance during probation
+         - Since ProbationStartDate
+         - Until NOW()
+      2. Calculate new metrics:
+         - Turnover during probation
+         - Winloss during probation
+         - BetCount during probation
+         - ActiveDays during probation
+      3. Determine category change:
+         - Improved → Downgrade (PA → PotentialPA/Normal)
+         - Deteriorated → Upgrade (PotentialPA → PA)
+         - Maintained → No change
+      4. UPDATE CTSCustomerClassification:
+         - Set new CategoryID
+         - Set new CategoryName
+         - Complete probation if end date reached
+         - Extend probation if still PA/PotentialPA
+    end note
+    sqlserver --> dataAccess : void
+    deactivate sqlserver
+    
+    dataAccess --> service : void
+    deactivate dataAccess
+  else No probation customers
+    note right
+      Skip classification
+      No customers to process
+    end note
+  end
+  
+  service --> jobService : this
+  deactivate service
+
+  == Step 4: Update System Parameters ==
+  jobService -> service : UpdateLastScanDate()
+  activate service
+  
+  service -> sysParamAccess : UpdateTimingExecutionForCTS\n(LastCustID, DailyProbation_LastCustID)
+  activate sysParamAccess
+  sysParamAccess -> mysql : UPDATE SystemParameter\nSET Value = LastCustID\nWHERE Key = 'DailyProbation_LastCustID'
+  activate mysql
+  note right
+    **Pagination Tracking**:
+    Store last processed CustID
+    for next batch/job run
+  end note
+  mysql --> sysParamAccess : void
+  deactivate mysql
+  sysParamAccess --> service : void
+  deactivate sysParamAccess
+  
+  service -> sysParamAccess : UpdateTimingExecutionForCTS\n(LastCategoryID, DailyProbation_LastCategoryID)
+  activate sysParamAccess
+  sysParamAccess -> mysql : UPDATE SystemParameter\nSET Value = LastCategoryID\nWHERE Key = 'DailyProbation_LastCategoryID'
+  activate mysql
+  note right
+    **Secondary Pagination Key**:
+    Store last processed CategoryID
+  end note
+  mysql --> sysParamAccess : void
+  deactivate mysql
+  sysParamAccess --> service : void
+  deactivate sysParamAccess
+  
+  service -> service : Check if CustProbations has data
+  service --> jobService : isContinue (bool)
+  deactivate service
+  note right
+    **isContinue Logic**:
+    - true: CustProbations.Any() = more to process
+    - false: CustProbations empty = all done
+  end note
+  
+  == Loop Condition Check ==
+  jobService -> jobService : Evaluate while (isContinue)
+  alt isContinue = true
+    note over jobService
+      More probation customers to process
+      Continue to next iteration
+    end note
+  else isContinue = false
+    note over jobService
+      All probation customers processed
+      Exit loop
+    end note
+  end
+end
+
+== Job Complete ==
+jobService --> controller : true
+deactivate jobService
+controller --> scheduler : true
+deactivate controller
+
+note bottom
+  **Pagination Mechanism**:
+  
+  1. **System Parameters Store Progress**:
+     - DailyProbation_LastCustID
+     - DailyProbation_LastCategoryID
+     - Persisted in database
+     - Survives job restarts
+  
+  2. **Each Iteration**:
+     - Get next batch (CustID > LastCustID)
+     - Process batch
+     - Update LastCustID and LastCategoryID
+     - Check if more customers exist
+  
+  3. **Loop Until Complete**:
+     - Continue while customers returned
+     - Stop when empty result set
+     - All probation customers processed
+  
+  **Advantages of Do-While vs Recursive**:
+  - Simpler code structure
+  - Less stack overhead
+  - Easier to debug
+  - Better for long-running processes
+end note
+
+@enduml
+

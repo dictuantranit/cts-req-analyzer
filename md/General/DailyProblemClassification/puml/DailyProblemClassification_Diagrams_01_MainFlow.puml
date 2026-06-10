@@ -1,0 +1,131 @@
+@startuml DailyProblemClassification_MainFlow
+title Daily Problem Classification - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam titleFontSize 16
+skinparam titleFontStyle bold
+
+|JobService|
+start
+:POST /api/classificationJobs/scanningDailyProblemClassification;
+note right
+  Batch size parameter
+  Ex: batchSize = 5000
+end note
+
+:Execute(batchSize);
+:Validate batchSize > 0;
+
+if (Valid?) then (yes)
+  :JobRun(batchSize);
+else (no)
+  :Log Error - Invalid Batch Size;
+  stop
+endif
+
+|Service Layer|
+:Start();
+note right
+  Initialize PADailyScanFromQueueModel
+end note
+
+:GetPADailyScanFromQueue();
+note right
+  Get PA customers from Daily Scan Queue
+  Source: CTSCustomerClassification_DailyPAQueue
+  FIFO (oldest first)
+end note
+
+:GetProblemAccountLosingClassification();
+note right
+  Calculate PA Losing Performance
+  Input: PA customers from queue
+  Output: ProblemAccountLosingClassificationEntity[]
+  FunctionId: ProblemDailyJob
+end note
+
+if (Has problem classification?) then (yes)
+  :Chunk by batchSize;
+  note right
+    Split into batches
+    Batch size: configurable
+  end note
+
+  repeat
+    |JobService|
+    :Process batch;
+    
+    |Service Layer|
+    :Reset();
+    note right
+      Reset problemAccounts for new batch
+    end note
+
+    :InsertProblemAccountProbationClassification();
+    note right
+      Convert to JSON
+      Insert PA Probation Classification
+      Returns: InsertPAProbationResult[]
+      - CTSCustID, CustID, IsRobot
+    end note
+
+    :InsertPALogic();
+    note right
+      **Two separate logic insertions:**
+      1. Regular PA → InsertPALogics()
+      2. Robot PA → InsertRobotLogics()
+      
+      Filter by IsRobot flag
+    end note
+
+    :PushCCToExternal();
+    note right
+      Push classification to MainDB
+      Parameters:
+      - RoleGroup: Member
+      - ExternalBatchSize
+      - IsUpdateDangerToMainDB: true
+    end note
+
+    if (Success?) then (no)
+      |JobService|
+      :Return false;
+      stop
+    endif
+
+  repeat while (More batches?) is (yes)
+  -> no;
+else (no)
+endif
+
+|Service Layer|
+:UpdateComplete();
+note right
+  Mark queue as completed
+  DELETE from DailyPAQueue
+  WHERE CustID IN (processed customers)
+  
+  Returns: isContinue
+  - true: More customers in queue
+  - false: Queue is empty
+end note
+
+|JobService|
+if (isContinue?) then (yes)
+  :Recursive Call - JobRun(batchSize);
+  note right
+    **Recursive Processing:**
+    Continue until queue is empty
+    Each recursion processes new batch
+  end note
+  detach
+else (no)
+  :Complete;
+  stop
+endif
+
+@enduml
+

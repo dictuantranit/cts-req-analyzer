@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Match Monitor Page - Documentation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .breadcrumb {
+            background: #f8f9fa;
+            padding: 15px 40px;
+            border-bottom: 1px solid #dee2e6;
+            font-size: 0.9em;
+            color: #6c757d;
+        }
+
+        .breadcrumb a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            background: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            padding: 0 40px;
+        }
+
+        .tab-button {
+            padding: 15px 30px;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #6c757d;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+        }
+
+        .tab-button:hover {
+            color: #667eea;
+            background: rgba(102, 126, 234, 0.1);
+        }
+
+        .tab-button.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            background: white;
+        }
+
+        /* Tab Content */
+        .tab-content {
+            display: none;
+            padding: 40px;
+            animation: fadeIn 0.5s;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Section Styles */
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section-title {
+            font-size: 1.8em;
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        .section-subtitle {
+            font-size: 1.4em;
+            color: #555;
+            margin: 30px 0 15px 0;
+            padding-left: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        /* Data Lineage Diagram */
+        .diagram-container {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .diagram-svg {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            transition: transform 0.3s;
+        }
+
+        .diagram-svg:hover {
+            transform: scale(1.02);
+        }
+
+        /* Field Mapping Table */
+        .field-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .field-table thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .field-table th,
+        .field-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .field-table th {
+            font-weight: 600;
+            font-size: 0.95em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .field-table tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        .field-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Info Boxes */
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+
+        .info-box.warning {
+            background: #fff3cd;
+            border-left-color: #ffc107;
+        }
+
+        .info-box.success {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+
+        .info-box.danger {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+
+        .info-box strong {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 1.1em;
+        }
+
+        /* Code Blocks */
+        .code-block {
+            background: #282c34;
+            color: #abb2bf;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+
+        /* Flow Chart Placeholders */
+        .flow-placeholder {
+            background: #f8f9fa;
+            border: 2px dashed #dee2e6;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            color: #6c757d;
+            margin: 20px 0;
+        }
+
+        .flow-placeholder h3 {
+            margin-bottom: 10px;
+            color: #495057;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.9);
+            animation: fadeIn 0.3s;
+        }
+
+        .modal.active {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            max-width: 95%;
+            max-height: 95%;
+            overflow: auto;
+            position: relative;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 10px;
+            right: 20px;
+            font-size: 2em;
+            color: #999;
+            cursor: pointer;
+            transition: color 0.3s;
+        }
+
+        .modal-close:hover {
+            color: #333;
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .badge.bg-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .badge.bg-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .badge.bg-warning {
+            background: #ffc107;
+            color: #000;
+        }
+
+        .badge.bg-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .badge.bg-info {
+            background: #17a2b8;
+            color: white;
+        }
+
+        /* List Styles */
+        .styled-list {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .styled-list li {
+            padding: 10px 0;
+            padding-left: 30px;
+            position: relative;
+        }
+
+        .styled-list li:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        /* Grid Layout */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin: 20px 0;
+        }
+
+        @media (max-width: 768px) {
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Card */
+        .card {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .card h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🎯 Match Monitor Page</h1>
+            <p>Complete Documentation - Data Lineage & Flow Charts</p>
+        </div>
+
+        <!-- Breadcrumb -->
+        <div class="breadcrumb">
+            <a href="../../index.html">📂 Home</a> / 
+            <a href="../../index.html">Website Pages</a> / 
+            <strong>Match Monitor</strong>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab-button active" onclick="switchTab('data-lineage')">
+                📊 Data Lineage
+            </button>
+            <button class="tab-button" onclick="switchTab('flow-charts')">
+                🔄 Flow Charts
+            </button>
+        </div>
+
+        <!-- Tab 1: Data Lineage -->
+        <div id="data-lineage" class="tab-content active">
+            <!-- Overview Section -->
+            <div class="section">
+                <h2 class="section-title">📋 Overview</h2>
+                <div class="info-box">
+                    <strong>Purpose</strong>
+                    The Match Monitor page displays dangerous matches and allows PIC to verify fraudulent transactions and mark customers as Problem Account (PA).
+                </div>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <h3>🎯 Key Features</h3>
+                        <ul class="styled-list">
+                            <li>Search matches by date/sport/bettype</li>
+                            <li>View fraud ticket details</li>
+                            <li>Verify suspicious transactions</li>
+                            <li>Manual association detection</li>
+                            <li>Mark customers as PA</li>
+                            <li>Export analysis to Excel</li>
+                        </ul>
+                    </div>
+                    <div class="card">
+                        <h3>👥 User Roles</h3>
+                        <ul class="styled-list">
+                            <li><strong>Monitor Team:</strong> View & verify tickets</li>
+                            <li><strong>Host Team:</strong> Full control (Hold Key, Mark PA)</li>
+                        </ul>
+                        <br>
+                        <h3>⚡ Data Freshness</h3>
+                        <ul class="styled-list">
+                            <li>Max 5-minute delay (job frequency)</li>
+                            <li>Real-time customer CC status</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Lineage Diagram -->
+            <div class="section">
+                <h2 class="section-title">🔍 Data Lineage Diagram</h2>
+                
+                <h3 class="section-subtitle">📋 Data Flow Process (4 Steps)</h3>
+                <div class="info-box">
+                    <strong>Complete Flow Overview</strong>
+                    The following steps show how tickets are detected and customers are classified:
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <div style="background: #f8f9fa; border-left: 5px solid #667eea; padding: 20px; margin-bottom: 15px; border-radius: 8px;">
+                        <h4 style="color: #667eea; margin-bottom: 10px;">
+                            <span style="background: #667eea; color: white; padding: 5px 15px; border-radius: 20px; font-size: 0.9em;">Step 1</span>
+                            Ticket Detection
+                        </h4>
+                        <p style="margin: 10px 0; line-height: 1.6;">
+                            Background jobs detect suspicious betting patterns and mark tickets as fraudulent:
+                        </p>
+                        <ul style="margin-left: 20px; line-height: 1.8;">
+                            <li><strong>Job:</strong> <code>md/MatchMonitor/GroupBetting</code> - General Group Betting Detection</li>
+                            <li><strong>Job:</strong> <code>md/MatchMonitor/SabaGroupBetting</code> - Saba Platform Group Betting Detection</li>
+                            <li><strong>Detection:</strong> Using 5 criteria (Device, AI, IP, 3 Matches, IP Last 3 Days) for general, 4 criteria for Saba</li>
+                            <li><strong>Output:</strong> Suspicious tickets identified and grouped by match</li>
+                        </ul>
+                    </div>
+
+                    <div style="background: #f8f9fa; border-left: 5px solid #28a745; padding: 20px; margin-bottom: 15px; border-radius: 8px;">
+                        <h4 style="color: #28a745; margin-bottom: 10px;">
+                            <span style="background: #28a745; color: white; padding: 5px 15px; border-radius: 20px; font-size: 0.9em;">Step 2</span>
+                            Ticket Labeling
+                        </h4>
+                        <p style="margin: 10px 0; line-height: 1.6;">
+                            Detected tickets are labeled with fraud reason:
+                        </p>
+                        <ul style="margin-left: 20px; line-height: 1.8;">
+                            <li><strong>Table:</strong> <code>CTSMatchMonitorDetail</code></li>
+                            <li><strong>Field:</strong> <code>Reason = "Group Betting (GB)"</code></li>
+                            <li><strong>Data:</strong> TransID, CustID, MatchID, Refno, BetChoice</li>
+                            <li><strong>Purpose:</strong> Mark tickets as fraudulent for review</li>
+                        </ul>
+                    </div>
+
+                    <div style="background: #f8f9fa; border-left: 5px solid #ffc107; padding: 20px; margin-bottom: 15px; border-radius: 8px;">
+                        <h4 style="color: #f57c00; margin-bottom: 10px;">
+                            <span style="background: #ffc107; color: #000; padding: 5px 15px; border-radius: 20px; font-size: 0.9em;">Step 3</span>
+                            General Customer Classification
+                        </h4>
+                        <p style="margin: 10px 0; line-height: 1.6;">
+                            Background job assigns Customer Class (CC) for customers with GB-labeled tickets:
+                        </p>
+                        <ul style="margin-left: 20px; line-height: 1.8;">
+                            <li><strong>Job:</strong> <code>md/General/MatchMonitorClassification</code></li>
+                            <li><strong>Frequency:</strong> Every 5 minutes</li>
+                            <li><strong>Processing:</strong> One match at a time (FIFO)</li>
+                            <li><strong>Action:</strong> CustID with GB tickets → <code>CategoryName = "System Detect Group Betting"</code></li>
+                            <li><strong>Table Updated:</strong> <code>CTSCustomerClassification</code></li>
+                            <li><strong>Scope:</strong> All sports (cross-sport detection)</li>
+                        </ul>
+                    </div>
+
+                    <div style="background: #f8f9fa; border-left: 5px solid #dc3545; padding: 20px; margin-bottom: 15px; border-radius: 8px;">
+                        <h4 style="color: #dc3545; margin-bottom: 10px;">
+                            <span style="background: #dc3545; color: white; padding: 5px 15px; border-radius: 20px; font-size: 0.9em;">Step 4</span>
+                            Sport-Specific Customer Classification
+                        </h4>
+                        <p style="margin: 10px 0; line-height: 1.6;">
+                            Background job assigns sport-specific Customer Class for GB-labeled tickets:
+                        </p>
+                        <ul style="margin-left: 20px; line-height: 1.8;">
+                            <li><strong>Job:</strong> <code>md/BySport/MatchMonitorClassificationBySport</code></li>
+                            <li><strong>Frequency:</strong> Every 5 minutes</li>
+                            <li><strong>Processing:</strong> Multiple matches per run (parallel)</li>
+                            <li><strong>Condition:</strong> IF match.SportType = "Saba Soccer"</li>
+                            <li><strong>Action:</strong> CustID with GB tickets → <code>CategoryName = "Saba System Detect Group Betting"</code></li>
+                            <li><strong>Table Updated:</strong> <code>CTSCustomerClassification</code></li>
+                            <li><strong>Scope:</strong> Sport-specific (Saba Soccer only for this case)</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="info-box warning">
+                    <strong>⚠️ Important Notes</strong>
+                    <ul style="margin-top: 10px; padding-left: 20px; line-height: 1.8;">
+                        <li><strong>Step 3 vs Step 4:</strong> Both jobs may classify the same customer, but Step 4 provides more specific sport-level classification</li>
+                        <li><strong>CategoryName Priority:</strong> Sport-specific categories (Step 4) typically take precedence over general categories (Step 3)</li>
+                        <li><strong>Data Freshness:</strong> Maximum 5-minute delay due to job frequency</li>
+                        <li><strong>Match Visibility:</strong> Match appears on this page after Step 2 completes (tickets labeled)</li>
+                        <li><strong>Customer CC Status:</strong> Updated after Step 3 or Step 4 completes</li>
+                    </ul>
+                </div>
+
+                <div class="diagram-container">
+                    <img src="MatchMonitor_DataLineage.svg" 
+                         alt="Match Monitor Data Lineage" 
+                         class="diagram-svg"
+                         onclick="openModal(this.src, 'Data Lineage Diagram')">
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 2: Flow Charts -->
+        <div id="flow-charts" class="tab-content">
+            
+            <!-- Background Jobs → Database -->
+            <div class="section">
+                <h2 class="section-title">📝 Data Write Operations (Jobs → Database)</h2>
+                
+                <h3 class="section-subtitle">Background Jobs</h3>
+                <div class="grid-2">
+                    <div class="card">
+                        <h3>🏅 MatchMonitorClassificationBySport</h3>
+                        <p><span class="badge bg-info">Sport-Specific</span></p>
+                        <ul class="styled-list">
+                            <li><strong>Frequency:</strong> Every 5 minutes</li>
+                            <li><strong>Purpose:</strong> Detect group betting by sport</li>
+                            <li><strong>Processing:</strong> Multiple matches per run</li>
+                            <li><strong>Reference:</strong> <code>md/BySport/MatchMonitorClassificationBySport</code></li>
+                        </ul>
+                    </div>
+                    <div class="card">
+                        <h3>🌐 MatchMonitorClassification (General)</h3>
+                        <p><span class="badge bg-primary">Cross-Sport</span></p>
+                        <ul class="styled-list">
+                            <li><strong>Frequency:</strong> Every 5 minutes</li>
+                            <li><strong>Purpose:</strong> General match monitoring</li>
+                            <li><strong>Processing:</strong> One match at a time (FIFO)</li>
+                            <li><strong>Reference:</strong> <code>md/General/MatchMonitorClassification</code></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <h3 class="section-subtitle">Tables Written by Jobs</h3>
+                <table class="field-table">
+                    <thead>
+                        <tr>
+                            <th>Table Name</th>
+                            <th>Database</th>
+                            <th>Operation</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>CTSMatchMonitor</strong></td>
+                            <td>CTS_DataCenter (MySQL)</td>
+                            <td><span class="badge bg-warning">INSERT/UPDATE</span></td>
+                            <td>Match detection data (MatchID, SportType, Reason, EventDate)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>CTSMatchMonitorDetail</strong></td>
+                            <td>CTS_DataCenter (MySQL)</td>
+                            <td><span class="badge bg-success">INSERT</span></td>
+                            <td>Fraud ticket details (TransID, CustID, Refno, BetChoice)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>CTSCustomerClassification</strong></td>
+                            <td>CTS_DataCenter (MySQL)</td>
+                            <td><span class="badge bg-warning">UPDATE</span></td>
+                            <td>Customer CC status (CategoryID, IsPA, CategoryName)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="info-box warning">
+                    <strong>Classification Logic</strong>
+                    When detection rules are satisfied:
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>MatchID has multiple tickets</li>
+                        <li>Job runs detection rules (group betting patterns)</li>
+                        <li>CustID with fraud ticket → marked as <strong>CC (Problem Account)</strong></li>
+                        <li>Assign specific CC category (e.g., "Group Betting")</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Database → API → UI -->
+            <div class="section">
+                <h2 class="section-title">🔄 Data Read Operations (Database → API → UI)</h2>
+
+                <h3 class="section-subtitle">Stored Procedures Used</h3>
+                <table class="field-table">
+                    <thead>
+                        <tr>
+                            <th>Stored Procedure</th>
+                            <th>Database</th>
+                            <th>Purpose</th>
+                            <th>Used By</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>CTS_DC_MatchMonitor_Get</strong></td>
+                            <td>CTS_DataCenter (MySQL)</td>
+                            <td>Get match list by scan/event date with filters</td>
+                            <td>Main page (GetMatchMonitor API)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>CTS_DC_MatchMonitorDetail_Get</strong></td>
+                            <td>CTS_DataCenter (MySQL)</td>
+                            <td>Get fraud ticket details for a match</td>
+                            <td>Detail modal (GetMatchMonitorDetail API)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>CTS_Rpt_MatchMonitor_MatchInfo</strong></td>
+                            <td>bodb_VR2Model (SQL Server)</td>
+                            <td>Get match info from MainDB (teams, league, etc.)</td>
+                            <td>Detail modal (GetMatchMonitor API)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>CTS_Rpt_MatchMonitor_AllTickets_Get</strong></td>
+                            <td>bodb_VR2Model (SQL Server)</td>
+                            <td>Get all tickets (not just fraud) for a match</td>
+                            <td>Detail modal (GetAllTickets API)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 class="section-subtitle">Field Mapping: Database → API → UI</h3>
+                <div class="info-box">
+                    <strong>Tracing Key Fields</strong>
+                    Below table shows how data flows from database columns through API properties to UI display fields.
+                </div>
+
+                <table class="field-table">
+                    <thead>
+                        <tr>
+                            <th>UI Field (Display)</th>
+                            <th>API Property</th>
+                            <th>Database Column</th>
+                            <th>Source Table</th>
+                            <th>Written By Job</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Match ID</td>
+                            <td>MatchID</td>
+                            <td>MatchID</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Sport Type</td>
+                            <td>SportType</td>
+                            <td>SportType</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Home Team</td>
+                            <td>HomeName</td>
+                            <td>HomeName</td>
+                            <td>Match Info (MainDB)</td>
+                            <td>N/A (Master data)</td>
+                        </tr>
+                        <tr>
+                            <td>Away Team</td>
+                            <td>AwayName</td>
+                            <td>AwayName</td>
+                            <td>Match Info (MainDB)</td>
+                            <td>N/A (Master data)</td>
+                        </tr>
+                        <tr>
+                            <td>Detection Reason</td>
+                            <td>Reason</td>
+                            <td>Reason</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Customer Class (CC)</td>
+                            <td>CategoryName</td>
+                            <td>CategoryName</td>
+                            <td>CTSCustomerClassification</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Fraud Ticket IDs</td>
+                            <td>FraudTrans</td>
+                            <td>FraudTrans</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Event Date</td>
+                            <td>EventDate</td>
+                            <td>EventDate</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Scan Date</td>
+                            <td>ScanDate</td>
+                            <td>ScanDate</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                        <tr>
+                            <td>Ticket Type</td>
+                            <td>TicketType</td>
+                            <td>TicketType</td>
+                            <td>CTSMatchMonitor</td>
+                            <td>Both jobs</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 class="section-subtitle">API Endpoints</h3>
+                <div class="code-block">
+<strong>1. Get Match List</strong>
+POST /MatchMonitor/GetMatchMonitor
+Request: { DateType, FromDate, ToDate, SportType, BetTypeID, Reason, ... }
+Response: { data: GetMatchMonitorViewModel[] }
+
+<strong>2. Get Match Detail</strong>
+POST /MatchMonitor/GetMatchMonitorDetail
+Request: { MatchID, SportType, TicketType, ... }
+Response: { data: MatchMonitorDetailViewModel }
+
+<strong>3. Verify Transaction</strong>
+POST /MatchMonitor/VerifyMatchMonitorTrans
+Request: { MatchID, TransIDs, IsVerified, ... }
+Response: { success: true/false }
+
+<strong>4. Mark Problem Account</strong>
+POST /MatchMonitor/MarkProblemAccount
+Request: { CustIDs, CategoryID, Reason, ... }
+Response: { success: true/false }
+                </div>
+            </div>
+
+            <!-- Data Dependencies -->
+            <div class="section">
+                <h2 class="section-title">🔗 Data Dependencies Summary</h2>
+                
+                <div class="info-box danger">
+                    <strong>Critical Dependencies</strong>
+                    Match Monitor page cannot function without:
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li><strong>Background Jobs:</strong> Must run to populate CTSMatchMonitor tables</li>
+                        <li><strong>CTS_DataCenter:</strong> Primary data source for match detection</li>
+                        <li><strong>MainDB:</strong> Master data for match info and transactions</li>
+                    </ul>
+                </div>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <h3>📥 Data Inputs (Dependencies)</h3>
+                        <ul class="styled-list">
+                            <li>Background Job: MatchMonitorClassificationBySport</li>
+                            <li>Background Job: MatchMonitorClassification (General)</li>
+                            <li>Database: CTS_DataCenter (Match & Customer data)</li>
+                            <li>Database: bodb_VR2Model (Match master & Transactions)</li>
+                        </ul>
+                    </div>
+                    <div class="card">
+                        <h3>📤 Data Outputs (Actions)</h3>
+                        <ul class="styled-list">
+                            <li>Verify fraud transactions (update CTSMatchMonitorDetail)</li>
+                            <li>Mark customers as PA (update CTSCustomerClassification)</li>
+                            <li>Hold Key for matches (manual intervention)</li>
+                            <li>Export analysis reports (Excel)</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- User Flows Section -->
+            <div class="section">
+                <h2 class="section-title">👤 User Interaction Flows</h2>
+                
+                <h3 class="section-subtitle">1. Search & View Matches Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>🔍 Search & View Matches</h3>
+                    <p>User Flow: Select date range → Apply filters → View match list → View details</p>
+                    <p><em>Flow chart diagram will be created here</em></p>
+                </div>
+
+                <h3 class="section-subtitle">2. Verify Transaction Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>✅ Verify Fraud Transactions</h3>
+                    <p>User Flow: Open match detail → Review fraud tickets → Verify/Unverify → Update status</p>
+                    <p><em>Flow chart diagram will be created here</em></p>
+                </div>
+
+                <h3 class="section-subtitle">3. Mark Problem Account Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>⚠️ Mark Customer as PA</h3>
+                    <p>User Flow: Select customers → Choose CC category → Add reason → Confirm → Update classification</p>
+                    <p><em>Flow chart diagram will be created here</em></p>
+                </div>
+            </div>
+
+            <!-- API Flows Section -->
+            <div class="section">
+                <h2 class="section-title">🔄 API Flow Charts</h2>
+                
+                <h3 class="section-subtitle">1. GetMatchMonitor API Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>📊 Get Match Monitor Data</h3>
+                    <p>API Flow: Receive request → Validate params → Call SP (CTS_DC_MatchMonitor_Get) → Get match info from MainDB → Merge data → Return JSON</p>
+                    <p><em>Sequence diagram will be created here</em></p>
+                </div>
+
+                <h3 class="section-subtitle">2. VerifyMatchMonitorTrans API Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>✅ Verify Transaction</h3>
+                    <p>API Flow: Receive request → Validate user role → Update CTSMatchMonitorDetail → Log action → Return success</p>
+                    <p><em>Sequence diagram will be created here</em></p>
+                </div>
+
+                <h3 class="section-subtitle">3. MarkProblemAccount API Flow</h3>
+                <div class="flow-placeholder">
+                    <h3>⚠️ Mark as Problem Account</h3>
+                    <p>API Flow: Receive request → Validate Host Team role → Update CTSCustomerClassification → Push to MainDB → Log action → Return success</p>
+                    <p><em>Sequence diagram will be created here</em></p>
+                </div>
+            </div>
+
+            <!-- Component Architecture -->
+            <div class="section">
+                <h2 class="section-title">🏗️ Component Architecture</h2>
+                
+                <div class="info-box">
+                    <strong>MVC Architecture</strong>
+                    Match Monitor page follows ASP.NET MVC pattern with clear separation of concerns.
+                </div>
+
+                <h3 class="section-subtitle">Component Structure</h3>
+                <div class="code-block">
+<strong>Controller Layer:</strong>
+MatchMonitorController.cs
+├── GetMatchMonitor() - Main page data
+├── GetMatchMonitorDetail() - Detail modal
+├── VerifyMatchMonitorTrans() - Verify tickets
+├── MarkProblemAccount() - Mark PA
+└── ExportExcel() - Export reports
+
+<strong>Service Layer:</strong>
+MatchMonitorService.cs
+├── GetMatchMonitor() - Fetch match data
+├── GetMatchMonitorDetail() - Fetch details
+└── ... (business logic methods)
+
+<strong>Data Access Layer:</strong>
+MatchMonitorDataAccess.cs
+├── GetMatchMonitor() - Call SP
+├── GetMatchMonitorDetail() - Call SP
+└── ... (database operations)
+
+<strong>View Layer:</strong>
+Views/MatchMonitor/
+├── Index.cshtml - Main page
+├── _MatchDetail.cshtml - Detail modal
+└── ... (partial views)
+                </div>
+
+                <h3 class="section-subtitle">Component Diagram</h3>
+                <div class="flow-placeholder">
+                    <h3>🧩 Component Interaction</h3>
+                    <p>Shows how Controller → Service → DataAccess → Database layers interact</p>
+                    <p><em>Component diagram will be created here</em></p>
+                </div>
+            </div>
+
+            <!-- Notes -->
+            <div class="section">
+                <h2 class="section-title">📝 Notes</h2>
+                <div class="info-box warning">
+                    <strong>Work In Progress</strong>
+                    Flow chart diagrams are placeholders and will be created based on:
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>Controller code analysis (MatchMonitorController.cs)</li>
+                        <li>Service layer implementation</li>
+                        <li>View component structure</li>
+                        <li>User interaction patterns</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for Diagram Zoom -->
+    <div id="diagramModal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close" onclick="closeModal()">&times;</span>
+            <div id="modalContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // Tab Switching
+        function switchTab(tabId) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all buttons
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabId).classList.add('active');
+            
+            // Add active class to clicked button
+            event.target.classList.add('active');
+        }
+
+        // Modal Functions
+        function openModal(imageSrc, title) {
+            const modal = document.getElementById('diagramModal');
+            const modalContent = document.getElementById('modalContent');
+            
+            modalContent.innerHTML = `
+                <h2 style="margin-bottom: 20px; color: #333;">${title}</h2>
+                <img src="${imageSrc}" style="width: 100%; height: auto;" alt="${title}">
+            `;
+            
+            modal.classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('diagramModal').classList.remove('active');
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('diagramModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
+    </script>
+</body>
+</html>
+

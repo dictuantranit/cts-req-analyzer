@@ -1,0 +1,221 @@
+@startuml DailyNormalClassification_SP_Preprocess_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_Daily_Preprocess - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_Daily_Preprocess**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 1200 seconds (20 minutes)" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @ListCustId (VARCHAR(MAX));
+  note right
+      Parameter: @ListCustId
+      Format: "123,456,789,1011,1213,..."
+      
+      Comma-separated customer IDs
+      from DailyNormalScanning
+  end note
+}
+
+partition "Parse Customer ID List" {
+  :Create temporary table;
+  note right
+      CREATE TABLE #tmpCustomers (
+        CustId BIGINT
+      );
+  end note
+  
+  :Parse comma-separated string;
+  note right
+      INSERT INTO #tmpCustomers (CustId)
+      SELECT CAST(value AS BIGINT)
+      FROM STRING_SPLIT(@ListCustId, ',')
+      WHERE TRIM(value) != '' AND value IS NOT NULL;
+      
+      SQL Server String Splitting:
+      - STRING_SPLIT (SQL Server 2016+)
+      - Efficient for large lists
+      - Handles variable-length input
+  end note
+  
+  :Validate parsed IDs;
+  note right
+      -- Remove invalid IDs
+      DELETE FROM #tmpCustomers
+      WHERE CustId IS NULL OR CustId <= 0;
+      
+      -- Get count for logging
+      DECLARE @CustomerCount INT;
+      SELECT @CustomerCount = COUNT(*) FROM #tmpCustomers;
+  end note
+}
+
+partition "Get Priority for Daily Scanning" {
+  :Query Priority table;
+  note right
+      DECLARE @Priority INT;
+      
+      SELECT TOP 1 @Priority = Priority
+      FROM CustomerClassification_Priority
+      WHERE GroupId = 1          -- General Classification
+        AND FunctionId = 2       -- Daily Function
+      ORDER BY Priority DESC;
+      
+      **Priority Table Structure**:
+      - GroupId: Classification group
+        * 1 = General
+        * 2 = BySport
+      - FunctionId: Function type
+        * 1 = Realtime
+        * 2 = Daily
+        * 3 = Others
+      - Priority: Processing priority value
+        * Realtime: ~200 (HIGH)
+        * Daily: ~100 (MEDIUM)
+        * Others: ~50 (LOW)
+  end note
+  
+  if (Priority IS NULL) then (yes)
+    :Set default Priority;
+    note right
+        SET @Priority = 100;  -- Default Daily priority
+    end note
+  else (no)
+    :Use retrieved Priority;
+  endif
+}
+
+partition "Insert into Normal Pool" {
+  :Call NormalPool_Insert SP;
+  note right
+      EXEC CTS_GeneralNormalClassification_NormalPool_Insert
+        @CustomerList = #tmpCustomers,
+        @Priority = @Priority,
+        @FunctionId = 2,      -- Daily
+        @GroupId = 1;         -- General
+      
+      **Purpose**:
+      - Insert customers into Normal Pool
+      - Queue for NormalAccountClassification job
+      - Assign Daily priority
+  end note
+  
+  :Insert into NormalPool table;
+  note right
+      Inside NormalPool_Insert SP:
+      
+      INSERT INTO CustomerClassification_NormalPool
+        (CustId, Priority, FunctionId, GroupId, 
+         CreatedDate, IsProcessed)
+      SELECT 
+        tc.CustId,
+        @Priority,               -- Daily priority (~100)
+        @FunctionId,             -- 2 (Daily)
+        @GroupId,                -- 1 (General)
+        GETDATE(),               -- Creation timestamp
+        0                        -- Not yet processed
+      FROM #tmpCustomers tc
+      LEFT JOIN CustomerClassification_NormalPool np
+        ON tc.CustId = np.CustId
+        AND np.IsProcessed = 0
+      WHERE np.CustId IS NULL;   -- Avoid duplicates
+      
+      **Duplicate Prevention**:
+      - LEFT JOIN checks existing unprocessed records
+      - Only insert if customer NOT already in pool
+      - Prevents duplicate classification
+  end note
+  
+  :Get inserted count;
+  note right
+      DECLARE @InsertedCount INT = @@ROWCOUNT;
+      
+      Track how many customers added to pool
+  end note
+}
+
+partition "Logging (Optional)" {
+  :Log operation;
+  note right
+      INSERT INTO ProcessLog (
+        ProcessName,
+        ProcessDate,
+        RecordsProcessed,
+        Priority,
+        Message
+      )
+      VALUES (
+        'DailyNormalPreprocess',
+        GETDATE(),
+        @InsertedCount,
+        @Priority,
+        'Daily Normal customers added to pool: ' + 
+        CAST(@InsertedCount AS VARCHAR) + ' / ' + 
+        CAST(@CustomerCount AS VARCHAR)
+      );
+      
+      **Purpose**: Monitor daily scanning activity
+  end note
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpCustomers;
+  end note
+}
+
+:Return success;
+stop
+
+note bottom
+  **Key Logic**:
+  1. Parse comma-separated customer IDs
+  2. Get Priority from Priority table (GroupId=1, FunctionId=2)
+  3. Call NormalPool_Insert to add customers to pool
+  4. Prevent duplicates (check IsProcessed=0)
+  5. Assign Daily priority for processing order
+  
+  **Tables Accessed**:
+  - CustomerClassification_Priority (READ)
+    * GroupId = 1 (General)
+    * FunctionId = 2 (Daily)
+    * Priority = ~100
+  
+  - CustomerClassification_NormalPool (INSERT)
+    * Queue for classification
+    * Processed by NormalAccountClassification
+    * IsProcessed flag tracks status
+  
+  **Processing Flow**:
+  ```
+  DailyNormalClassification (Producer)
+          ↓
+    Normal Pool (Queue)
+          ↓
+  NormalAccountClassification (Consumer)
+          ↓
+    NormalAccount Table
+          ↓
+  NormalAccountInsert
+          ↓
+       MainDB
+  ```
+  
+  **Priority System**:
+  - **Realtime** (~200): Processed first
+  - **Daily** (~100): Processed second
+  - **Others** (~50): Processed last
+  - Ensures responsive handling of active customers
+  
+  **Timeout**:
+  - 1200 seconds (20 minutes)
+  - Allows processing large batches
+  - Longer than most SPs due to high volume
+end note
+
+@enduml
+

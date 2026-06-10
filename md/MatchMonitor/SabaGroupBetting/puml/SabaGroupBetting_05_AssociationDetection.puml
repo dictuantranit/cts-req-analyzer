@@ -1,0 +1,262 @@
+@startuml SabaGroupBetting_AssociationDetection
+!theme plain
+title Match Monitor Saba Group Betting - Simplified Association Detection (Updated 2025-11-19)
+
+start
+
+floating note left
+    **COMPARISON: Standard vs Saba**
+    
+    Standard Group Betting:
+    - Sport-specific configuration
+    - 5 detection criteria (conditional)
+    - Complex setup
+    
+    Saba Group Betting:
+    - No configuration needed
+    - 4 detection criteria (always ON)
+    - Simple setup
+end note
+
+:Standard Group Betting
+Configuration;
+
+note right
+    **Sport-Specific Settings:**
+    - DeviceSports: "1,2,3,4,5"
+    - AISports: "1,2,3,4,5"
+    - IPSports: "1,2,3,4,5"
+    - 3MatchesLast7DaysSports: "1,2,3,4,5"
+    - IPLast3DaysSports: "1,2,3,4,5"
+    
+    **Dynamic Enabling:**
+    IsDevice = DeviceSports.Contains(SportType)
+    IsAI = AISports.Contains(SportType)
+    IsIP = IPSports.Contains(SportType)
+    
+    **Result:** Different criteria per sport
+    
+    **5 Criteria:**
+    ✓ Device (sport-specific)
+    ✓ AI (sport-specific)
+    ✓ IP (sport-specific)
+    ✓ 3 Matches Last 7 Days (sport-specific)
+    ✓ IP Last 3 Days (sport-specific)
+end note
+
+:Saba Group Betting
+Configuration;
+
+note right
+    **Fixed Settings:**
+    NO sport-specific configuration!
+    
+    **Always Enabled:**
+    IsDevice = true
+    IsAI = true
+    IsIP = true
+    Is3MatchesLast7Days = true
+    
+    **Result:** Same criteria for all matches
+    
+    **4 Criteria:**
+    ✓ Device Detection (always ON)
+    ✓ AI Detection (always ON)
+    ✓ IP Detection (always ON)
+    ✓ 3 Matches Last 7 Days (always ON)
+    ✗ IP Last 3 Days (not used)
+    
+    **Saba-Specific:**
+    + MappingCustDictionary required
+end note
+
+:Get Customer Lists;
+
+note right
+    From MatchStaging:
+    - CTSCustIDList: "5001,5002,5003,5004"
+    - CustIDList: "101,102,103,104"
+    
+    These are already mapped in staging
+end note
+
+:Create DetectAssociationParamModel;
+
+note right
+    **Saba Code (Simple):**
+    
+    var param = new DetectAssociationParamModel
+    {
+        CTSCustIds = ctsCustIDList,
+        CustIds = custIDList,
+        IsDevice = true,           // Always
+        IsAI = true,               // Always
+        IsIP = true,               // Always
+        Is3MatchesLast7Days = true, // Always
+        MappingCustDictionary = MappingCustDictionary
+    };
+    
+    **Standard Code (Complex):**
+    
+    var param = new DetectAssociationParamModel
+    {
+        CTSCustIds = ctsCustIDList,
+        CustIds = custIDList,
+        IsDevice = AssDetectSetting.DeviceSports.Contains(sportType),
+        IsAI = AssDetectSetting.AISports.Contains(sportType),
+        IsIP = AssDetectSetting.IPSports.Contains(sportType),
+        Is3MatchesLast7Days = 
+            AssDetectSetting._3MatchesLast7DaysSports.Contains(sportType),
+        IsIPLast3Days = 
+            AssDetectSetting.IPLast3DaysSports.Contains(sportType),
+        CustIdsIPLast3Days = licCustIDList
+    };
+end note
+
+:Call AssociationDetectionService;
+
+partition "Detection Processing (4 Criteria)" {
+    
+    :1. Device Detection (Always);
+    note right
+        Query CTSCustomer for DeviceID:
+        SELECT CustID, DeviceID
+        FROM CTSCustomer
+        WHERE CTSCustID IN (5001, 5002, 5003, 5004)
+        GROUP BY DeviceID
+        HAVING COUNT(*) > 1
+        
+        Result: DeviceID "ABC123": [5001, 5002, 5003]
+    end note
+    
+    :2. AI Detection (Always);
+    note right
+        Call AI/ML Service:
+        - Analyze betting patterns
+        - Calculate similarity scores
+        - Group similar customers
+        
+        Result: Pattern Similarity: [5002, 5004]
+    end note
+    
+    :3. IP Detection (Always);
+    note right
+        Query TicketTrans for IP:
+        SELECT CustID, IPAddress
+        FROM TicketTrans
+        WHERE CTSCustID IN (5001, 5002, 5003, 5004)
+            AND BetTime >= NOW() - INTERVAL 1 DAY
+        GROUP BY IPAddress
+        HAVING COUNT(DISTINCT CTSCustID) > 1
+        
+        Result: IP "192.168.1.100": [5001, 5002]
+    end note
+    
+    :4. 3 Matches Last 7 Days (Always);
+    note right
+        Query co-betting history:
+        SELECT CTSCustID1, CTSCustID2, COUNT(*) as MatchCount
+        FROM (
+            SELECT DISTINCT MatchID, CTSCustID
+            FROM TicketTrans
+            WHERE CTSCustID IN (5001, 5002, 5003, 5004)
+                AND BetTime >= NOW() - INTERVAL 7 DAY
+        ) t1
+        JOIN t2 ON t1.MatchID = t2.MatchID
+        GROUP BY CTSCustID1, CTSCustID2
+        HAVING COUNT(*) >= 3
+        
+        Result: Co-bet 3+ times: [5001, 5002, 5003]
+    end note
+    
+    :Merge All Detection Results;
+    note right
+        **Merge Logic:**
+        1. Union all groups from 4 criteria
+        2. If any overlap then Merge into one group
+        3. Transitive grouping
+        
+        Example:
+        - Device: {5001, 5002, 5003}
+        - IP: {5001, 5002}
+        - 3Matches: {5002, 5003}
+        Merged: {5001, 5002, 5003} to GroupID 1
+        
+        - AI: {5004}
+        Separate: {5004} to No GroupID (alone)
+    end note
+    
+    :Assign GroupID and Type;
+    note right
+        For each group:
+        - Assign sequential GroupID
+        - Record which criteria detected it
+        
+        Example:
+        {
+            CTSCustID: 5001,
+            GroupID: 1,
+            AssociationType: "Device,IP,3Matches"
+        }
+    end note
+}
+
+:Filter: GroupID != null;
+
+:Return Association Results;
+note right
+    IEnumerable<DetectAssociationMergeGroupEntity>
+    
+    Example:
+    [
+        { CTSCustID: 5001, GroupID: 1, Type: "Device,IP,3Matches" },
+        { CTSCustID: 5002, GroupID: 1, Type: "Device,IP,3Matches" },
+        { CTSCustID: 5003, GroupID: 1, Type: "Device,3Matches" }
+    ]
+    
+    Customer 5004 not returned (no group)
+end note
+
+stop
+
+floating note right
+    ===========================================
+    SABA ASSOCIATION DETECTION SUMMARY
+    ===========================================
+    
+    **Simplifications:**
+    ✅ No sport-specific configuration
+    ✅ All criteria always enabled
+    ✅ No IPLast3Days complexity
+    ✅ No LicCustList needed
+    ✅ Simpler code (~8 lines vs ~15 lines)
+    
+    **Saba-Specific:**
+    🔧 MappingCustDictionary required
+    🔧 Fixed criteria (4 instead of 5)
+    
+    **Same Detection Power:**
+    - Device, AI, IP, 3Matches all work
+    - Same grouping algorithm
+    - Same accuracy
+    
+    **Benefits:**
+    - Easier to maintain
+    - Less configuration
+    - Faster execution (no sport checks)
+    - More predictable results
+    
+    **Trade-off:**
+    - Less flexible
+    - Cannot disable criteria per sport
+    - Always runs all 4 detections
+    
+    **Use Case:**
+    Perfect for Saba platform where:
+    - All matches need same detection
+    - No sport-specific requirements
+    - Consistency over flexibility
+end note
+
+@enduml
+

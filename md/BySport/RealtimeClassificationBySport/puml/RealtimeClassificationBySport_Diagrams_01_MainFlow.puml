@@ -1,0 +1,112 @@
+@startuml RealtimeClassificationBySport_MainFlow
+!theme plain
+title Realtime Classification By Sport - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationBySportJobs/ScanRealtimeClassificationBySport
+    Parameter: batchInternalSize (default: 5000)
+end note
+
+:RealtimeClassificationBySportJobService.Execute(batchInternalSize);
+
+:Start();
+  :Initialize customers and customerCategories models;
+
+:GetNewPlaceBetCustomers();
+  :Call CTS_BySportNormalClassification_RealTime_GetChanges [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Parameters:
+      - @ScannedMaxId (OUTPUT)
+      Logic:
+      - Get TOP 20000 records from CustomerClassification_BySport_RealtimeChanges
+      - Order by ID ASC
+      - Return: CustID, SportGroup
+      - Output: ScannedMaxId (MAX ID)
+      Returns:
+      - CustomerNewPlaceBets (CustID, SportGroup)
+      - ScannedMaxId
+  end note
+
+if (Has Customers?) then (yes)
+  :Chunk customers by batchInternalSize;
+  
+  repeat :For each chunk
+    :GetCustomerCategory(custBatch);
+      :Call CTS_DC_CustClassification_BySport_Realtime_GetCategory [SP];
+      note right
+          Parameters:
+          - ip_CustInfoList (JSON)
+          Logic:
+          - Parse JSON customer list
+          - Get current classification from CTSCustomerClassification_BySport
+          - Categorize customers:
+            * NULL or Normal: CustomerNormals
+            * PA or PotentialPA: CustomerPADailyScans
+          Returns:
+          - ResultSet 1: CustomerNormals (CustID, SportGroup)
+          - ResultSet 2: CustomerPADailyScans (CustID, SportGroup)
+      end note
+  repeat while (More chunks?)
+  
+  :Parallel Processing;
+  
+  fork
+    :PreprocessCustomerClassRealtime(batchInternalSize);
+      :Chunk CustomerNormals by batchInternalSize;
+      
+      repeat :For each chunk
+        :Call CTS_BySportNormalClassification_RealTime_Preprocess [SP];
+        note right
+            Database: bodb_VR2Model (SQL Server)
+            Parameters:
+            - @CustomersXML (XML)
+            Logic:
+            - Parse XML customer list
+            - Get Priority from CustomerClassification_BySport_Priority
+            - Call CTS_BySportNormalClassification_NormalPool_Insert
+            - Insert customers into Normal Pool for classification
+        end note
+      repeat while (More chunks?)
+  fork again
+    :InsertPADailyScanQueue(batchInternalSize);
+      :Chunk CustomerPADailyScans by batchInternalSize;
+      
+      repeat :For each chunk
+        :Call CTS_DC_CustClassification_BySport_DailyScanPA_InsertToQueue [SP];
+        note right
+            Parameters:
+            - ip_CustInfoList (JSON)
+            Logic:
+            - Parse JSON customer list
+            - Insert into CTSCustomerClassification_BySport_DailyPAQueue
+            - Set CreatedTime = NOW()
+        end note
+      repeat while (More chunks?)
+  end fork
+  
+else (no)
+  note right
+    No customers with new place bets
+  end note
+endif
+
+:CompleteCustomerRealtime();
+  :Call CTS_BySportNormalClassification_RealTime_Complete [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Parameters:
+      - @ScannedMaxId
+      Logic:
+      - Delete records from CustomerClassification_BySport_RealtimeChanges
+      - WHERE ID <= @ScannedMaxId
+      - This marks processed records as completed
+  end note
+
+:Return Success;
+stop
+
+@enduml
+

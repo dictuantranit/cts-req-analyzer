@@ -1,0 +1,109 @@
+@startuml NormalAccountClassificationBySport_SP_GetCurrentCategory_Detailed
+!theme plain
+title Normal Account Classification By Sport - SP GetCurrentCategory Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_GetCurrentCategory;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Parameter: @ip_CustSport (JSON)
+end note
+
+:Get Constants;
+note right
+    CONST_GROUP_PROBATION
+    CONST_PARENTID_NORMAL
+    CONST_PARENTID_WRAPPER
+end note
+
+:Create Temp Tables;
+note right
+    Temp_Cust:
+    - CustID, SportGroup
+    - PRIMARY KEY (CustID, SportGroup)
+    
+    Temp_InvalidCust:
+    - CustID
+    - PRIMARY KEY (CustID)
+    
+    Temp_CustCategory:
+    - CustID, SportGroup
+    - CategoryID, CategoryGroupID
+    - IsProbationLastDay, CreatedDate
+    - PRIMARY KEY (CustID, SportGroup)
+end note
+
+:Parse JSON Customer List;
+note right
+    INSERT INTO Temp_Cust
+    SELECT DISTINCT CustID, SportGroup
+    FROM JSON_TABLE(@ip_CustSport, ...)
+end note
+
+:Validate Customers;
+note right
+    INSERT INTO Temp_InvalidCust
+    SELECT tmp.CustID
+    FROM Temp_Cust AS tmp
+    LEFT JOIN CTSCustomer AS c
+      ON c.CustID = tmp.CustID AND c.CustSubID = 0
+    WHERE c.CustID IS NULL
+    
+    DELETE FROM Temp_Cust
+    WHERE CustID IN (SELECT CustID FROM Temp_InvalidCust)
+end note
+
+:Get Latest Normal Category;
+note right
+    INSERT INTO Temp_CustCategory
+    SELECT tmpc.CustID, tmpc.SportGroup
+         , tmplc.CategoryID, tmplc.CategoryGroupID
+         , tmplc.CreatedDate
+    FROM Temp_Cust AS tmpc
+    LATERAL JOIN (
+        SELECT cc.CustID, cc.SportID, cc.CategoryID
+             , ca.CategoryGroupID, cc.CreatedDate, ca.ParentID
+        FROM CTSCustomerClassification_BySport AS cc
+        INNER JOIN CustomerCategory AS ca
+          ON ca.CategoryID = cc.CategoryID
+        WHERE tmpc.CustID = cc.CustID
+          AND tmpc.SportGroup = cc.SportID
+          AND ca.IsActive = 1
+          AND ca.ParentID <> CONST_PARENTID_WRAPPER
+        ORDER BY ca.CategoryPriority ASC
+               , cc.LastModifiedDate DESC
+        LIMIT 1
+    ) tmplc
+    WHERE tmplc.ParentID = CONST_PARENTID_NORMAL
+end note
+
+:Get Probation Info;
+note right
+    UPDATE Temp_CustCategory AS tmpCc
+    INNER JOIN StaticList AS s
+      ON s.ListID = 23 AND s.ItemID = tmpCc.SportGroup
+    SET tmpCc.IsProbationLastDay = (
+        CASE WHEN tmpCc.CreatedDate <= DATE_SUB(CurrentDate, INTERVAL CAST(s.ItemValue AS UNSIGNED) DAY)
+        THEN 1 ELSE 0 END
+    )
+    WHERE tmpCc.CategoryGroupID = CONST_GROUP_PROBATION
+end note
+
+:Return Results;
+note right
+    SELECT DISTINCT tmpCust.CustID
+         , tmpCust.SportGroup
+         , CASE WHEN tmpCc.CategoryGroupID IS NULL
+                THEN 0 ELSE tmpCc.CategoryGroupID END AS CategoryID
+         , CASE WHEN tmpCc.IsProbationLastDay IS NULL
+                THEN 0 ELSE tmpCc.IsProbationLastDay END AS IsProbationLastDay
+    FROM Temp_Cust AS tmpCust
+    LEFT JOIN Temp_CustCategory AS tmpCc
+      ON tmpCc.CustID = tmpCust.CustID
+     AND tmpCc.SportGroup = tmpCust.SportGroup
+end note
+
+stop
+
+@enduml
+

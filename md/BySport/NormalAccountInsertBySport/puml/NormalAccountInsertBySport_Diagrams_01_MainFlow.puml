@@ -1,0 +1,99 @@
+@startuml NormalAccountInsertBySport_MainFlow
+!theme plain
+title Normal Account Insert By Sport - Main Business Flow
+
+start
+:Job Triggered (Scheduled Job);
+note right
+    Service: NormalAccountInsertBySportJobService
+    Parameters: batchExternalSize, batchInternalSize
+end note
+
+:Execute(batchExternalSize, batchInternalSize);
+if (batchInternalSize <= 0?) then (yes)
+    :Set batchInternalSize = 5000;
+else (no)
+endif
+
+:do-while loop;
+repeat
+    :JobRun(batchExternalSize, batchInternalSize);
+    :GetNormalClassificationBySport();
+    note right
+        Calls SP: CTS_BySportNormalClassification_NormalAccount_Get
+        Returns: NormalAccount list, ScannedMaxId
+    end note
+    
+    if (Has NormalAccount?) then (yes)
+        :Initialize failedThreads (ConcurrentBag<bool>);
+        :Chunk customers by batchInternalSize;
+        :Process chunks in parallel (DegreeOfParallelism = 4);
+        
+        partition "For Each Chunk" {
+            :InsertNormalClassificationBySport(custBatch, batchExternalSize, failedThreads);
+            
+            :Split customers into two groups;
+            note right
+                - insertNormalAccounts: CategoryId != -1
+                - specialCCAcounts: CategoryId == -1 (Special CC)
+            end note
+            
+            :InsertNormaBySport(insertNormalAccounts, batchExternalSize);
+            partition "Insert Normal Accounts" {
+                :InsertNormalClassificationBySport(custs, serviceName);
+                :Serialize customers to JSON;
+                :Call InsertCustomerClassificationBySport();
+                note right
+                    InputFlowID: BySportInsertNormal (332)
+                    Calls SP: CTS_DC_CustClassification_BySport_Insert
+                end note
+                
+                if (Insert Success?) then (yes)
+                    :Get CustInfos from result;
+                    :Transform to InsertNormalAccountCustInfoEntity;
+                    :PushCCBySportToMainDB(pushCC, serviceName, batchExternalSize);
+                    note right
+                        Push classification data to Main DB
+                    end note
+                else (no)
+                    :Set isSuccess = false;
+                endif
+            }
+            
+            :PushSpecialCCBySport(specialCCAcounts, batchExternalSize);
+            partition "Push Special CC" {
+                if (Has specialCCAcounts?) then (yes)
+                    :Transform to InsertNormalAccountCustInfoEntity;
+                    :PushCCBySportToMainDB(pushCCListSpecialCC, serviceName, batchExternalSize);
+                    note right
+                        Push Special CC data to Main DB
+                        (No insert to CTS_DataCenter, only push to Main DB)
+                    end note
+                else (no)
+                endif
+            }
+            
+            if (Both operations success?) then (no)
+                :Add false to failedThreads;
+            else (yes)
+            endif
+        }
+        
+        :CompleteNormalAccountBySport(ScannedMaxId, failedThreads.IsEmpty);
+        note right
+            Only complete if all threads succeeded
+            Calls SP: CTS_BySportNormalClassification_NormalAccount_Complete
+            Updates: CustomerClassification_Parameter (DataId = 2)
+        end note
+        
+        :Set isContinue = true;
+    else (no)
+        :Set isContinue = false;
+    endif
+    
+repeat while (isContinue?)
+
+stop
+
+@enduml
+

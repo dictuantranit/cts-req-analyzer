@@ -1,0 +1,180 @@
+@startuml NormalAccountClassification_SP_GetCategory_Detailed
+!theme plain
+title Stored Procedure: CTS_DC_CustClassification_Normal_GetCurrentCategory - Detailed Flow
+
+card "**SP: CTS_DC_CustClassification_Normal_GetCurrentCategory**" as SP {
+  rectangle "**Database**: CTS_DataCenter (MySQL)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @ip_CustInfo (JSON);
+  note right
+      Parameter: @ip_CustInfo
+      Format: JSON Array
+      
+      Example:
+      [
+        {"CustID": 123, "ScanSpecialLicSubType": 0},
+        {"CustID": 456, "ScanSpecialLicSubType": 1},
+        ...
+      ]
+  end note
+}
+
+partition "Parse JSON Data" {
+  :Create temporary table;
+  note right
+      CREATE TEMPORARY TABLE Temp_CustInfo (
+        CustID BIGINT,
+        ScanSpecialLicSubType INT
+      );
+  end note
+  
+  :Parse JSON array;
+  note right
+      MySQL JSON Functions:
+      
+      INSERT INTO Temp_CustInfo
+      SELECT 
+        JSON_EXTRACT(item, '$.CustID') AS CustID,
+        JSON_EXTRACT(item, '$.ScanSpecialLicSubType') AS ScanSpecialLicSubType
+      FROM JSON_TABLE(
+        @ip_CustInfo,
+        '$[*]' COLUMNS(
+          item JSON PATH '$'
+        )
+      ) AS parsed;
+      
+      Or using loop with JSON_EXTRACT
+  end note
+}
+
+partition "Get Current Customer Classification" {
+  :Query classification data;
+  note right
+      SELECT 
+        tc.CustID,
+        cc.CategoryID,
+        CASE 
+          WHEN cc.CreatedDate >= CURDATE() THEN 1
+          ELSE 0
+        END AS IsNewCreated,
+        CASE 
+          WHEN cc.ProbationEndDate = CURDATE() THEN 1
+          ELSE 0
+        END AS IsProbationLastDay,
+        CASE 
+          WHEN tc.ScanSpecialLicSubType = 1 
+           AND cc.SpecialLicSubCategoryID IS NOT NULL THEN 1
+          ELSE 0
+        END AS IsSpecialLicSubCC
+      INTO #TempResult
+      FROM Temp_CustInfo tc
+      LEFT JOIN CTSCustomerClassification cc
+        ON tc.CustID = cc.CustId;
+      
+      **Tables**:
+      - CTSCustomerClassification: Current customer category
+        * CustId (PK)
+        * CategoryID (FK to CustomerCategory)
+        * CreatedDate (First classification date)
+        * ProbationEndDate (End of probation period)
+        * SpecialLicSubCategoryID (Special licensee category)
+  end note
+}
+
+partition "Calculate Classification Flags" {
+  :Determine flags;
+  note right
+      **IsNewCreated**:
+      - True if CreatedDate = TODAY
+      - Indicates first-time classification
+      - May trigger welcome/onboarding logic
+      
+      **IsProbationLastDay**:
+      - True if ProbationEndDate = TODAY
+      - Last day of probation period
+      - Triggers probation completion logic
+      
+      **IsSpecialLicSubCC**:
+      - True if has special licensee sub-type
+      - AND SpecialLicSubCategoryID is set
+      - Requires special classification handling
+  end note
+}
+
+partition "Return Result Set" {
+  :Prepare result set;
+  note right
+      SELECT 
+        CustID,
+        CategoryID,
+        IsNewCreated,
+        IsProbationLastDay,
+        IsSpecialLicSubCC
+      FROM #TempResult
+      ORDER BY CustID;
+      
+      **Purpose**: Provide classification context
+      for each customer in batch
+  end note
+  
+  :Return ResultSet;
+}
+
+partition "Cleanup" {
+  :Drop temporary tables;
+  note right
+      DROP TEMPORARY TABLE IF EXISTS Temp_CustInfo;
+      DROP TEMPORARY TABLE IF EXISTS #TempResult;
+  end note
+}
+
+note right
+  **Key Logic**:
+  1. Parse JSON array of customer info
+  2. Get current classification from CTSCustomerClassification
+  3. Calculate dynamic flags:
+     - IsNewCreated (first-time today)
+     - IsProbationLastDay (probation ending today)
+     - IsSpecialLicSubCC (special licensee)
+  4. Return classification context for each customer
+  
+  **Tables Accessed**:
+  - CTSCustomerClassification (READ)
+    * CustId (PK)
+    * CategoryID (Current category)
+    * CreatedDate (First classification)
+    * ProbationEndDate (Probation end)
+    * SpecialLicSubCategoryID (Special category)
+  
+  **Classification Flags Usage**:
+  - **IsNewCreated**: New customer logic
+    * First-time classification rules
+    * Welcome bonuses
+    * Initial risk assessment
+  
+  - **IsProbationLastDay**: Probation completion
+    * Remove probation status
+    * Apply permanent classification
+    * Update permissions
+  
+  - **IsSpecialLicSubCC**: Special handling
+    * Special licensee sub-type logic
+    * Different classification rules
+    * Compliance requirements
+  
+  **Performance**:
+  - JSON parsing: Fast with JSON_TABLE
+  - LEFT JOIN: Handles new customers (NULL category)
+  - Index on CustId: Fast lookup
+  - Batch processing: Efficient for multiple customers
+end note
+
+stop
+
+@enduml
+

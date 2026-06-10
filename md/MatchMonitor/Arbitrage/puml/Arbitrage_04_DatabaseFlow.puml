@@ -1,0 +1,225 @@
+@startuml Arbitrage_DatabaseFlow
+!theme plain
+title Match Monitor - Arbitrage Detection - Database Flow (All SPs)
+
+!define DB_COLOR #E3F2FD
+!define SP_COLOR #FFF9C4
+!define TABLE_COLOR #C8E6C9
+
+' Databases
+database "CTS_DataCenter" DB_COLOR {
+  rectangle "SystemParameter" as SysParam TABLE_COLOR
+  rectangle "MatchMonitorRuleSetting" as RuleSetting TABLE_COLOR
+  rectangle "MatchMonitorStagingArbitrageNonLive\n(Pool 2004)" as Staging TABLE_COLOR
+  rectangle "CTSMatchMonitor" as Match TABLE_COLOR
+  rectangle "CTSMatchMonitorDetail" as Detail TABLE_COLOR
+  rectangle "Association Tables" as Assoc TABLE_COLOR
+}
+
+' Stored Procedures
+rectangle "**Stored Procedures**" SP_COLOR {
+  rectangle "SP 1: RuleArbitrage_Get\n(Get staging matches)" as SP1 #FFEB3B
+  rectangle "SP 2: RuleArbitrage_Process\n(Detect and process)" as SP2 #FFEB3B
+  rectangle "SP 3: RuleArbitrage_Complete\n(Save results)" as SP3 #FFEB3B
+  rectangle "SP 4: RuleArbitrage_TransClean\n(Clean staging)" as SP4 #FFEB3B
+  rectangle "SP 5: Association_Device_Get\n(Device detection)" as SP5 #FFC107
+  rectangle "SP 6: Association_AI_Get\n(AI detection)" as SP6 #FFC107
+  rectangle "SP 7: Association_IP_Get\n(IP detection)" as SP7 #FFC107
+}
+
+' SP1: Get staging matches
+SP1 -down-> SysParam : READ LastScannedSequenceID\n(ParameterID = 128)
+SP1 -down-> RuleSetting : READ TimeStep, CustStake\n(RuleGroupID = 5, Reason = 2)
+SP1 -down-> Match : READ old GroupID\n(WHERE Reason = 'AR')
+SP1 -down-> Staging : **SELECT** matches\nWHERE SequenceID > LastScannedSequenceID\nGROUP BY MatchID, ScoreDiff, BettypeID, BetID, HDP\nLIMIT 5000
+
+note bottom of SP1
+  **Input:**
+  - @ip_LiveIndicator = 0 (NonLive only)
+  
+  **Output:**
+  - MatchStagingList (grouped)
+  - @op_MaxSequenceID
+  
+  **Logic:**
+  1. Get LastScannedSequenceID from SystemParameter
+  2. Get rule settings (TimeStep, CustStake)
+  3. Read old GroupID from CTSMatchMonitor
+  4. Query staging table for new matches
+  5. Group by match characteristics
+  6. Return grouped matches + MaxSequenceID
+end note
+
+' SP5, SP6, SP7: Association Detection
+SP2 -up-> SP5 : **CALL** for each customer group\n(Device detection)
+SP2 -up-> SP6 : **CALL** for each customer group\n(AI detection)
+SP2 -up-> SP7 : **CALL** for each customer group\n(IP detection)
+
+SP5 -down-> Assoc : **SELECT** Device associations
+SP6 -down-> Assoc : **SELECT** AI associations
+SP7 -down-> Assoc : **SELECT** IP associations
+
+note top of SP5
+  **Association Detection (3 Criteria):**
+  
+  SP5: Device
+  - Input: CTSCustIDList
+  - Logic: Same DeviceID
+  - Output: Grouped customers
+  
+  SP6: AI
+  - Input: CTSCustIDList
+  - Logic: AI pattern matching
+  - Output: Grouped customers
+  
+  SP7: IP
+  - Input: CTSCustIDList
+  - Logic: Same IP address
+  - Output: Grouped customers
+end note
+
+' SP2: Process Rule
+SP2 -down-> Staging : **SELECT** tickets\nWHERE SequenceID IN (...)\nAND CustID IN (CustGroup)
+
+note bottom of SP2
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_MatchID, @ip_ScoreDiff, @ip_BettypeID, @ip_BetID, @ip_HDP
+  - @ip_SequenceIDList (from SP1)
+  - @ip_CustGroup (JSON: CustID + GroupID from association)
+  
+  **Logic:**
+  1. Parse CustGroup JSON
+  2. Get all tickets for customers in group
+  3. Time-based grouping (TimeGroupID = TransDateToSecond / TimeStep)
+  4. Check opposite bets (GROUP BY Betteam, HAVING COUNT(DISTINCT Betteam) > 1)
+  5. Validate stake threshold (SUM(Stake) >= MinStake per customer)
+  6. Check Agent customers (Alpha/Maxbet)
+  7. Build result groups
+  
+  **Output:**
+  - CompleteMatches (detected arbitrage groups)
+  - ReprocessMatches (need more processing)
+end note
+
+' SP3: Complete
+SP3 -down-> Match : **INSERT** detected matches\n(Reason = 'AR')
+SP3 -down-> Detail : **INSERT** ticket details
+
+note bottom of SP3
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_TransGroupJson (from merged results)
+  - @ip_MaxSequenceID
+  - Match info (MatchID, ScoreDiff, BettypeID, BetID, HDP)
+  
+  **Logic:**
+  1. Parse TransGroupJson
+  2. INSERT into CTSMatchMonitor:
+     - MatchID, ScoreDiff, BettypeID, BetID, HDP
+     - GroupID (unique)
+     - Reason = 'AR'
+     - TransIDList, CustIDList
+  3. INSERT into CTSMatchMonitorDetail:
+     - All tickets in group
+     - Link to CTSMatchMonitor via MatchID+GroupID
+  
+  **Tables Updated:**
+  - CTSMatchMonitor (match level)
+  - CTSMatchMonitorDetail (ticket level)
+end note
+
+' SP4: Clean
+SP4 -down-> Staging : **DELETE** processed tickets\nWHERE SequenceID <= MaxSequenceID
+
+note bottom of SP4
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_MaxSequenceID
+  
+  **Logic:**
+  1. DELETE from MatchMonitorStagingArbitrageNonLive
+  2. WHERE SequenceID <= MaxSequenceID
+  3. Free space for next batch
+  
+  **Purpose:**
+  - Clean processed tickets
+  - Prevent duplicate processing
+  - Maintain staging table size
+end note
+
+' Flow annotations
+note as N1
+  **Complete Flow Sequence:**
+  
+  1. SP1: Get Staging Matches
+     └─ Read: SystemParameter, RuleSetting, Staging
+     └─ Output: MatchStagingList + MaxSequenceID
+  
+  2. Association Detection (3 SPs in parallel)
+     ├─ SP5: Device detection
+     ├─ SP6: AI detection
+     └─ SP7: IP detection
+     └─ Output: CustGroup JSON (CustID + GroupID)
+  
+  3. SP2: Process Rule (Round 1 + Round 2)
+     ├─ Read: Staging tickets for CustGroup
+     ├─ Time-based grouping
+     ├─ Opposite bets check
+     ├─ Stake threshold validation
+     └─ Output: CompleteMatches + ReprocessMatches
+  
+  4. SP3: Complete (Save Results)
+     ├─ Merge all CompleteMatches
+     ├─ Assign unique GroupID
+     ├─ INSERT: CTSMatchMonitor (Reason='AR')
+     └─ INSERT: CTSMatchMonitorDetail
+  
+  5. SP4: Clean Staging
+     └─ DELETE processed tickets from staging
+end note
+
+' Table details
+note right of Staging
+  **MatchMonitorStagingArbitrageNonLive**
+  (Pool 2004)
+  
+  Source: Insert Ticket Detail job
+  Frequency: Every 5 minutes
+  
+  Key Fields:
+  - SequenceID (incremental)
+  - MatchID, ScoreDiff, BettypeID, BetID, HDP
+  - CustID, Stake, Betteam
+  - TransDate, TransID
+  - SubscriberID (Agent detection)
+end note
+
+note right of Match
+  **CTSMatchMonitor**
+  
+  Stores detected arbitrage matches
+  
+  Key Fields:
+  - MatchID, GroupID (PK)
+  - Reason = 'AR' (Arbitrage)
+  - ScoreDiff, BettypeID, BetID, HDP
+  - TransIDList (comma-separated)
+  - CustIDList (comma-separated)
+  - InsertTime
+end note
+
+note right of Detail
+  **CTSMatchMonitorDetail**
+  
+  Stores individual tickets
+  
+  Key Fields:
+  - MatchID, GroupID, TransID (PK)
+  - CustID, Stake, Betteam
+  - Odds, TransDate
+  - Reason = 'AR'
+end note
+
+@enduml
+

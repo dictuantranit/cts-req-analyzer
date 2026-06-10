@@ -1,0 +1,185 @@
+@startuml InsertTicketDetail_Sequence
+!theme plain
+title Match Monitor - Insert Ticket Detail - Sequence Diagram
+
+actor "Background Job\n(Scheduler)" as Job
+participant "MatchMonitorController\n(API)" as Controller
+participant "MatchMonitorJobService\n(Service Layer)" as JobService
+participant "MatchMonitorStagingService\n(Business Logic)" as StagingService
+participant "SystemParameterServices\n(Config)" as SysParam
+participant "MatchMonitorStagingDataAccess\n(Data Access)" as DataAccess
+database "MainDB\n(SQL Server)" as MainDB
+database "CTS MySQL\n(SystemParameter)" as CTSParam
+database "CTS MySQL\n(Staging Tables)" as CTSStaging
+
+== API Call ==
+
+Job -> Controller : POST /MatchMonitorInsertTicketDetailLive\n(batchSize=5000)
+activate Controller
+
+Controller -> JobService : InsertTicketDetail(5000, isLive=true)
+activate JobService
+
+== Step 1: Initialize ==
+
+JobService -> StagingService : Start(5000, true)
+activate StagingService
+
+StagingService -> StagingService : Set BatchSize = 5000\nSet IsLive = true\nSet PoolEnumType = MatchMonitorStagingLivePoolType
+
+== Step 2: Get Last Scanned SequenceID ==
+
+JobService -> StagingService : GetLastScannedSequenceID()
+
+StagingService -> SysParam : GetLastScannedId(MatchMonitorLastScannedTrans)
+activate SysParam
+
+SysParam -> CTSParam : SELECT Value\nFROM SystemParameter\nWHERE ParameterID = MatchMonitorLastScannedTrans
+activate CTSParam
+CTSParam --> SysParam : LastScannedSequenceID = 1234567890
+deactivate CTSParam
+
+SysParam --> StagingService : 1234567890
+deactivate SysParam
+
+== Step 3: Get Bettype Settings ==
+
+JobService -> StagingService : GetMatchTrans()
+
+StagingService -> SysParam : GetBetTypeSettings(FunctionID=MMBetType)
+activate SysParam
+
+SysParam -> CTSParam : SELECT SportTypeID, BetTypeID\nFROM SportBettypeSetting\nWHERE FunctionID=MMBetType AND Status=1
+activate CTSParam
+CTSParam --> SysParam : [{"SportTypeID":1,"BetTypeID":1},...]
+deactivate CTSParam
+
+SysParam --> StagingService : BettypeSettings JSON
+deactivate SysParam
+
+StagingService -> StagingService : SerializeToJSON(BettypeSettings)
+
+== Step 4: Get Match Trans from MainDB ==
+
+StagingService -> DataAccess : GetMatchTrans(\n  lastScannedSequenceID=1234567890,\n  batchSize=5000,\n  isLive=true,\n  betTypeInfos=JSON\n)
+activate DataAccess
+
+DataAccess -> MainDB : EXEC CTS_DC_MatchMonitor_Details_Get\n  @ip_QueryType=1,\n  @ip_LastScannedSequenceID=1234567890,\n  @ip_BatchSize=5000,\n  @ip_IsLive=1,\n  @ip_ListSportBettype=JSON
+activate MainDB
+
+MainDB -> MainDB : SELECT SequenceID, TransID, CustID, MatchID,\n  Stake, Odds, BetTeam, SportType, BettypeID,\n  LiveHomeScore, LiveAwayScore, KickOffTime\nFROM Transaction\nWHERE SequenceID > 1234567890\n  AND SportType/BettypeID IN (settings)\n  AND EventStatus = 'running'\nORDER BY SequenceID\nLIMIT 5000
+
+MainDB --> DataAccess : List<TicketDetailEntity> (3000 tickets)
+deactivate MainDB
+
+DataAccess --> StagingService : TicketStagings (3000 tickets)
+deactivate DataAccess
+
+== Step 5: Insert to Staging (Parallel) ==
+
+JobService -> StagingService : InsertMatchMonitorStagingWithParallel()
+
+StagingService -> StagingService : SerializeToJSON(TicketStagings)
+
+note over StagingService
+  6 parallel threads execute simultaneously:
+  - Pool 1001: Group Betting
+  - Pool 1002: Saba Group Betting
+  - Pool 1003: Hedging
+  - Pool 1004: Fixed Game
+end note
+
+par Pool 1001 (Group Betting)
+  StagingService -> DataAccess : InsertMatchMonitorStaging(\n  matchTransJson,\n  isLive=true,\n  poolType=1001\n)
+  activate DataAccess
+  
+  DataAccess -> CTSStaging : CALL CTS_DC_MatchMonitor_Staging_Insert(\n  @ip_LiveIndicator=1,\n  @ip_PoolType=1001,\n  @ip_TransList=JSON\n)
+  activate CTSStaging
+  
+  CTSStaging -> CTSStaging : Parse JSON to Temp_Staging\nJoin with MatchMonitorRuleSetting\nCalculate ScoreDiff, HDP\nINSERT INTO staging table
+  
+  CTSStaging --> DataAccess : Success
+  deactivate CTSStaging
+  
+  DataAccess --> StagingService : Done
+  deactivate DataAccess
+
+else Pool 1002 (Saba Group Betting)
+  StagingService -> DataAccess : InsertMatchMonitorStaging(\n  matchTransJson,\n  isLive=true,\n  poolType=1002\n)
+  activate DataAccess
+  
+  DataAccess -> CTSStaging : CALL CTS_DC_MatchMonitor_Staging_Insert(\n  @ip_LiveIndicator=1,\n  @ip_PoolType=1002,\n  @ip_TransList=JSON\n)
+  activate CTSStaging
+  CTSStaging --> DataAccess : Success
+  deactivate CTSStaging
+  
+  DataAccess --> StagingService : Done
+  deactivate DataAccess
+
+else Pool 1003 (Hedging)
+  StagingService -> DataAccess : InsertMatchMonitorStaging(\n  matchTransJson,\n  isLive=true,\n  poolType=1003\n)
+  activate DataAccess
+  
+  DataAccess -> CTSStaging : CALL CTS_DC_MatchMonitor_Staging_Insert(\n  @ip_LiveIndicator=1,\n  @ip_PoolType=1003,\n  @ip_TransList=JSON\n)
+  activate CTSStaging
+  CTSStaging --> DataAccess : Success
+  deactivate CTSStaging
+  
+  DataAccess --> StagingService : Done
+  deactivate DataAccess
+
+else Pool 1004 (Fixed Game)
+  StagingService -> DataAccess : InsertMatchMonitorStaging(\n  matchTransJson,\n  isLive=true,\n  poolType=1004\n)
+  activate DataAccess
+  
+  DataAccess -> CTSStaging : CALL CTS_DC_MatchMonitor_Staging_Insert(\n  @ip_LiveIndicator=1,\n  @ip_PoolType=1004,\n  @ip_TransList=JSON\n)
+  activate CTSStaging
+  CTSStaging --> DataAccess : Success
+  deactivate CTSStaging
+  
+  DataAccess --> StagingService : Done
+  deactivate DataAccess
+end
+
+StagingService -> StagingService : All pools inserted
+
+== Step 6: Update Last Scanned SequenceID ==
+
+JobService -> StagingService : UpdateLastScannedSequenceID()
+
+StagingService -> StagingService : maxSequenceID = Max(TicketStagings.SequenceID)\n= 1234572890
+
+StagingService -> SysParam : UpdateValueForSystemParamById(\n  maxSequenceID=1234572890,\n  ParameterID=MatchMonitorLastScannedTrans\n)
+activate SysParam
+
+SysParam -> CTSParam : UPDATE SystemParameter\nSET Value = 1234572890\nWHERE ParameterID = MatchMonitorLastScannedTrans
+activate CTSParam
+CTSParam --> SysParam : Success
+deactivate CTSParam
+
+SysParam --> StagingService : Done
+deactivate SysParam
+
+== Return Result ==
+
+StagingService --> JobService : Success
+deactivate StagingService
+
+JobService --> Controller : true
+deactivate JobService
+
+Controller --> Job : HTTP 200 OK
+deactivate Controller
+
+note right of Job
+  **Next Steps:**
+  1. Detection rules (GB, Saba GB, Fixed Game, Hedging)
+     read from staging tables
+  2. Each rule filters tickets based on their criteria
+  3. Detected matches/tickets are written to:
+     - CTSMatchMonitor (match level)
+     - CTSMatchMonitorDetail (ticket level)
+end note
+
+@enduml
+

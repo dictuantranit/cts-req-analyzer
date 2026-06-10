@@ -1,0 +1,312 @@
+@startuml TWRobotAccount_MainFlow
+title TW Robot Account - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam titleFontSize 16
+skinparam titleFontStyle bold
+
+|JobService|
+start
+:POST /api/classificationJobs/robotTWClassification;
+note right
+  Parameters:
+  - batchExternalSize: Batch size for external push
+  - batchInternalSize: Batch size for PA insertion
+  
+  Ex: batchExternalSize = 1000, batchInternalSize = 5000
+end note
+
+:ScanningTWRobotAccount(batchExternalSize, batchInternalSize);
+:Validate batch sizes > 0;
+
+if (Valid?) then (yes)
+  :InsertTWRobot();
+else (no)
+  :Log Error - Invalid Batch Size;
+  stop
+endif
+
+|Service Layer|
+:Start();
+note right
+  **Initialize TWRobotUserViewEntity**:
+  - RobotUsers: Empty list
+  - MaxTimestamp: 0
+end note
+
+:GetLastTimespan();
+note right
+  **Get Last Scanned Timespan**:
+  
+  System Parameter:
+  - Key: RobotAccountLastScannedTime
+  - Value: Last timestamp (long)
+  
+  **Purpose**:
+  - Time-based pagination
+  - Get robots since last scan
+  - Incremental processing
+end note
+
+:GetTWRobotUser();
+note right
+  **Get TW Robot Customers**:
+  
+  1. Query TW System:
+     - FROM TW Robot Database
+     - WHERE Timestamp > @lastScannedTimespan
+     - TW system detected robots
+     - ORDER BY Timestamp
+  
+  **Source**: TW (Taiwan) System ⭐
+  
+  **Returns**: TWRobotUserViewEntity
+  - RobotUsers[] (CustId, Counter)
+  - MaxTimestamp (for pagination)
+  
+  **TW Detection Criteria**:
+  - Taiwan-specific robot rules
+  - Manual/rule-based detection
+  - Regional focus (Taiwan market)
+  - Historical data analysis
+end note
+
+if (Has robot users?) then (yes)
+  :GetCustomerRole();
+  note right
+    **Enrich with Customer Role**:
+    
+    1. Extract CustIDs from RobotUsers
+    2. Convert to comma-separated string
+    3. Query Customer Role:
+       - Get RoleID for each CustID
+       - 1 = Member, Others = Agency
+    4. Update RobotUsers with RoleID
+    
+    **Purpose**:
+    - Separate Member vs Agency
+    - Different processing paths
+    - Agency → Agency API
+    - Member → Direct PA insert
+  end note
+
+  :GetRobotUserCategoryId();
+  note right
+    **Get Robot Category**:
+    
+    Query: GetCategoryByCategoryTypeName
+    - CategoryTypeName: "ROBOTUSER"
+    - Returns: CategoryID for Robot
+    
+    **Validation**:
+    - If null → Log error
+    - Robot category must exist
+    - Used for all robot PA inserts
+  end note
+
+  :InsertTWRobotPackage();
+  note right
+    **Two-Path Processing** ⭐:
+    
+    1. **Agency Robots** (RoleID != 1):
+       - Call Agency API
+       - Batch insert via external endpoint
+       - Different handling
+    
+    2. **Member Robots** (RoleID == 1):
+       - Direct PA insert
+       - Batch processing with chunks
+       - Push to MainDB
+    
+    **Sequential Processing**:
+    - Agency first, then Member
+    - If Agency fails → stop
+    - If Member fails → stop
+  end note
+
+  partition "Agency Robot Processing" {
+    :Filter: RoleID != 1 (Agency);
+    
+    if (Has agency robots?) then (yes)
+      :Log input data;
+      
+      :Build InsertTWAgencyRobotModel;
+      
+      :Call Agency API (POST);
+      note right
+        **Agency API Call**:
+        - Endpoint: agencyApiUrl + /InsertTWRobotAgency
+        - Parameters:
+          * Robots: Agency robot list
+          * InternalSize: batch size
+          * ExternalBatchSize: external batch
+          * FromFlow: CTSServices
+        
+        **API handles**:
+        - Agency-specific PA insert
+        - External routing
+        - Special agency rules
+      end note
+
+      if (API failed?) then (yes)
+        :Return false;
+        stop
+      endif
+    else (no)
+      note right
+        No agency robots
+        Skip agency processing
+      end note
+    endif
+  }
+
+  partition "Member Robot Processing" {
+    :Filter: RoleID == 1 (Member);
+    
+    if (Has member robots?) then (yes)
+      :Chunk by batchInternalSize;
+      
+      repeat
+        :Process member chunk;
+        
+        :Log input data;
+        
+        :Transform to InsertProblemAccountEntity;
+        note right
+          **TWRobotUserEntity → InsertProblemAccountEntity**:
+          
+          new InsertProblemAccountEntity(robot, robotCategoryId)
+          {
+            CustID: robot.CustId,
+            CategoryID: robotCategoryId,
+            RoleID: robot.RoleID,
+            // ... robot-specific fields
+          }
+        end note
+
+        :InsertProblemAccountPackage();
+        note right
+          **Insert Robot PA Classification**:
+          - FunctionId: RobotUserJob
+          - CCInputFlow: InsertPACategory
+          - Insert into CTSCustomerClassification
+          - Robot category
+          - Returns: Inserted CustIDs
+          
+          **Inherited Method** from ProblemAccountServices
+        end note
+
+        :PushExternalPackageByCustId();
+        note right
+          **Push to MainDB** (External):
+          - Input: Inserted CustIDs
+          - Parameters: pushConfig
+            * RoleGroup: Member
+            * IsUpdateDangerToMainDB: true
+            * IsSyncAFCData: false (no AFC for robots)
+          - Makes robot classification visible
+        end note
+
+        if (Push failed?) then (yes)
+          :Return false;
+          stop
+        endif
+
+        :Thread.Sleep(RobotUsers_SleepTimes);
+        note right
+          **Throttling** ⭐:
+          - Sleep between chunks
+          - Prevents database overload
+          - Prevents API overload
+          - Smooth processing
+        end note
+
+      repeat while (More member chunks?) is (yes)
+      -> no;
+    else (no)
+      note right
+        No member robots
+        Skip member processing
+      end note
+    endif
+  }
+
+  |System Parameters|
+  :UpdateLastTimespan();
+  note right
+    **Update System Parameter**:
+    - Key: RobotAccountLastScannedTime
+    - Value: robotInfo.MaxTimestamp
+    
+    **Enables**:
+    - Next run starts from last timestamp
+    - Time-based pagination
+    - No re-processing
+    - Incremental scanning
+  end note
+
+else (no)
+  note right
+    **No TW robot users**:
+    All robots processed
+    or no new robots detected
+  end note
+endif
+
+|JobService|
+:Complete;
+note right
+  **Job Completion**:
+  All TW-detected robots processed
+  System parameter updated to latest timestamp
+  Ready for next job run
+end note
+
+note right
+  **Key Characteristics**:
+  
+  1. **TW System Detection Source** ⭐:
+     - Taiwan-based robot detection
+     - Manual/rule-based detection
+     - Regional focus
+     - Historical data analysis
+  
+  2. **Time-Based Pagination**:
+     - Uses Timestamp for incremental processing
+     - WHERE Timestamp > @lastScannedTimespan
+     - System parameter persisted
+  
+  3. **Dual-Path Processing** ⭐:
+     - **Agency**: Via Agency API (special handling)
+     - **Member**: Direct PA insert + Push MainDB
+     - Sequential processing
+  
+  4. **5-Step Fluent Chain**:
+     - Start → GetLastTimespan → GetTWRobotUser
+     - → GetCustomerRole → GetRobotUserCategoryId
+     - → InsertTWRobotPackage
+  
+  5. **Batch Processing with Throttling**:
+     - Chunk by internalSize (Member only)
+     - Sleep between chunks ⭐
+     - Prevents overload
+  
+  6. **Long Timeout**:
+     - SP timeout: 900 seconds (15 minutes)
+     - Complex TW system query
+     - Large dataset possible
+  
+  **TW Robot Detection**:
+  - Source: TW (Taiwan) System
+  - Rule-based detection
+  - Taiwan market specific
+  - Manual review integration
+end note
+
+stop
+
+@enduml
+

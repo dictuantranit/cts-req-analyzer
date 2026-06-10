@@ -1,0 +1,68 @@
+@startuml DangerMonitor_Sequence_WithAssociation
+!theme plain
+title Danger Monitor Search - With Association Mode Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "AssociationDetection\nService" as AssocService
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+User -> Controller: POST GetDangerMonitor(filter)\nIsRootUserAssociationMode = true
+activate Controller
+
+Controller -> Controller: DetectAssociationCustByUserRoot(filter)
+activate Controller
+
+alt ConfigSettings.IsUsingFanexAPIDirect
+    Controller -> Controller: Call API via ApiHelper
+    note right of Controller: API Endpoint:\nDetectAssociationCustByUserRoot
+else Direct Mode
+    Controller -> AssocService: DetectAssociationCustByUserRoot(filterAss)
+    activate AssocService
+    note right of AssocService: Filter:\n- UserNames\n- IsAI, IsDevice, IsIP
+    
+    AssocService -> AssocService: Validate UserNames
+    AssocService -> AssocService: Detect Association
+    note right of AssocService: Detect by:\n- Device\n- AI (Betting Pattern)\n- IP Address
+    
+    AssocService --> Controller: IEnumerable<DetectAssociationByUserRootModel>
+    deactivate AssocService
+end
+
+Controller -> Controller: JsonConvert.SerializeObject(result)
+Controller --> Controller: Return JSON string
+deactivate Controller
+
+Controller -> Service: GetDangerMonitorWithAssociationByRootUser(\n  filter,\n  associationData\n)
+activate Service
+
+Service -> Service: GetDangerMonitorInfoWithAssociationRootUser(\n  filter,\n  associationData\n)
+Service -> Service: Create DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria
+note right of Service: Set parameters:\n- FromDate, ToDate\n- SportList, BettypeList\n- AssociationsList (JSON)\n- Other filters
+
+Service -> Repository: Fetch<DangerMMTicketInfoEntity>(criteria)
+activate Repository
+
+Repository -> Repository: GetSettingKey() = "CTS_MatchTicketInfo_Associations_Get"
+Repository -> DB: EXEC CTS_MatchTicketInfo_Associations_Get [SP]
+activate DB
+note right of DB: Stored Procedure:\nCTS_MatchTicketInfo_Associations_Get\n@FromDate, @ToDate\n@SportList, @BettypeList\n@AssociationsList (JSON)
+DB --> Repository: Return ResultSet
+deactivate DB
+
+Repository --> Service: IEnumerable<DangerMMTicketInfoEntity>
+deactivate Repository
+
+Service -> Service: Map to DangerMMTicketInfoModel
+Service -> Service: MappingDangerMonitorWithSportBettype()
+Service --> Controller: GetDangerMonitorResultViewModel
+deactivate Service
+
+Controller -> Controller: OrderDangerMonitorItems()
+Controller --> User: JSON Response { data: { Items: [...] } }
+deactivate Controller
+
+@enduml
+

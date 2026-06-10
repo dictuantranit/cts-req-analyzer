@@ -1,0 +1,92 @@
+@startuml NormalAccountClassificationBySport_DatabaseFlow
+!theme plain
+title Normal Account Classification By Sport - Database Flow Diagram
+
+start
+:Job Triggered;
+
+:GetNormalPoolCustomers;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Stored Procedure: CTS_BySportNormalClassification_NormalPool_Get
+    Tables:
+    - CustomerClassification_BySport_NormalPool
+    - CustomerClassification_BySport
+    - CustomerClassification_Parameter
+    Output:
+    - NormalPoolCustomers (CustId, SportGroup, IsCheckBetCount)
+    - ScannedMaxId
+end note
+
+if (Has Customers?) then (yes)
+    :Chunk customers by batchInternalSize;
+    
+    :Parallel Processing (5 threads);
+    
+    repeat :For each chunk
+        :GetCurrentCustomerCategory;
+        note right
+            Database: CTS_DataCenter (MySQL)
+            Stored Procedure: CTS_DC_CustClassification_BySport_GetCurrentCategory
+            Input:
+            - CustSportList (JSON)
+            Tables:
+            - CTSCustomer
+            - CTSCustomerClassification_BySport
+            - CustomerCategory
+            - StaticList
+            Output:
+            - CustomerCategories (CustID, SportGroup, CategoryID, IsProbationLastDay)
+        end note
+        
+        :Join and Prepare Data;
+        note right
+            Join NormalPoolCustomers with CustomerCategories
+            Create customerInfos with:
+            - CustID, SportGroup
+            - CategoryID, IsProbationLastDay
+            - IsCheckBetCount
+        end note
+        
+        :ClassifyNormalPoolCustomers;
+        note right
+            Database: bodb_VR2Model (SQL Server)
+            Stored Procedure: CTS_BySportNormalClassification_NormalPool_Classify
+            Input:
+            - CustomersXML
+            Tables:
+            - CustomerClassification_BySport_LatestActiveDay
+            - CustomerClassification_BySport_BetCount
+            - CustomerClassification_BySport_ScannedDailyCust
+            - bodb_dwrs (Accumulated Info)
+            - bodb02.dbo.Customer
+            Logic:
+            - Get accumulated performance
+            - Calculate classification rules
+            - Determine NewCategoryId
+            - Update/Insert classification
+        end note
+        
+        :ClearNormalPoolCustomers;
+        note right
+            Database: bodb_VR2Model (SQL Server)
+            Stored Procedure: CTS_BySportNormalClassification_NormalPool_Clear
+            Input:
+            - CustomersXML
+            - ScannedMaxId
+            Tables:
+            - CustomerClassification_BySport_NormalPool
+            Logic:
+            - Delete processed customers
+            - WHERE ID <= ScannedMaxId
+        end note
+    repeat while (More chunks?) is (yes)
+    ->no;
+else (no)
+    :Stop Processing;
+endif
+
+stop
+
+@enduml
+

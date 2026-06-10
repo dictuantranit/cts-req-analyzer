@@ -1,0 +1,141 @@
+@startuml FixedGame_Sequence
+!theme plain
+title Fixed Game Detection - Sequence Diagram
+
+actor "Background Job" as Job
+participant "MatchMonitorJobService" as JobService
+participant "MatchMonitorServices" as Service
+participant "MatchMonitorDataAccess" as DA
+database "CTS_DataCenter" as DB
+
+== Phase 1: Get Matches to Process ==
+
+Job -> JobService: ProcessRuleFixedGame(isLive, numberOfThread)
+activate JobService
+
+JobService -> Service: GetMatchRuleFixedGame(isLive)
+activate Service
+
+Service -> DA: GetMatchRuleFixedGame(isLive)
+activate DA
+
+DA -> DB: CALL CTS_DC_MatchMonitor_RuleFixedGame_Get\n(ip_LiveIndicator, @op_MaxSequenceID)
+activate DB
+
+DB -> DB: Read SystemParameter\nfor LastSequenceID
+
+DB -> DB: Query staging table\nMatchMonitorStagingFixedGame[Live/NonLive]
+
+DB -> DB: GROUP BY MatchID, ScoreDiff,\nBettypeID, BetID, HDP, Betteam
+
+DB --> DA: Return:\n- MaxSequenceID\n- List of match keys
+deactivate DB
+
+DA --> Service: MatchMonitorRuleFixedGameModel
+deactivate DA
+
+Service --> JobService: MatchMonitorRuleFixedGameModel
+deactivate Service
+
+== Phase 2: Process Each Match (Parallel) ==
+
+loop For each match (parallel)
+    JobService -> Service: ProcessRuleFixedGame(isLive, maxTransId, matchInfo)
+    activate Service
+    
+    Service -> DA: ProcessRuleFixedGame(isLive, maxTransId, matchInfo)
+    activate DA
+    
+    DA -> DB: CALL CTS_DC_MatchMonitor_RuleFixedGame_Process\n(ip_LiveIndicator, ip_MaxSequenceID,\nip_MatchID, ip_ScoreDiff, ip_BettypeID,\nip_BetID, ip_HDP, ip_Betteam)
+    activate DB
+    
+    DB -> DB: Get rule settings\nfrom MatchMonitorRuleSetting
+    note right
+        - TimeStep
+        - TotalTicket
+        - HighStake
+        - HighStakeTicketPercent
+        - OddsSpread
+    end note
+    
+    DB -> DB: Load tickets into Temp_Trans
+    
+    DB -> DB: Group tickets by TimeStep windows
+    
+    DB -> DB: Apply detection rules:\n- TotalTicket > threshold\n- HighStakePercent > threshold\n- OddsSpread >= threshold
+    
+    DB -> DB: Check Same Sign Odds\n(all bets on same outcome)
+    
+    DB -> DB: Check Different Sign Odds\n(bets on both outcomes)
+    
+    DB --> DA: Return detected tickets:\n- Reason\n- TransIDList\n- CustIDList
+    deactivate DB
+    
+    DA --> Service: IEnumerable<MatchCompleteRuleFixedGameModel>
+    deactivate DA
+    
+    Service --> JobService: IEnumerable<MatchCompleteRuleFixedGameModel>
+    deactivate Service
+    
+    == Phase 3: Complete & Save ==
+    
+    alt Has detected tickets
+        JobService -> Service: CompleteTransRuleFixedGame(parameters)
+        activate Service
+        
+        Service -> DA: CompleteTransRuleFixedGame(para)
+        activate DA
+        
+        DA -> DB: CALL CTS_DC_MatchMonitor_RuleFixedGame_Complete\n(ip_LiveIndicator, ip_MaxSequenceID,\nip_MatchID, ip_ScoreDiff, ip_BettypeID,\nip_BetID, ip_HDP, ip_Betteam, ip_TransGroup)
+        activate DB
+        
+        DB -> DB: Check if match exists\nin MatchMonitorDetails
+        
+        alt Match exists
+            DB -> DB: Merge new tickets\nwith existing tickets (UNION)
+            DB -> DB: UPDATE MatchMonitorDetails
+        else Match not exists
+            DB -> DB: INSERT MatchMonitor
+            DB -> DB: INSERT MatchMonitorDetails
+        end
+        
+        DB --> DA: Success
+        deactivate DB
+        
+        DA --> Service: Success
+        deactivate DA
+        
+        Service --> JobService: Success
+        deactivate Service
+    end
+end
+
+== Phase 4: Clean Staging ==
+
+JobService -> Service: CleanTransRuleFixedGame(isLive, maxSequenceID)
+activate Service
+
+Service -> DA: CleanTransRuleFixedGame(isLive, maxSequenceID)
+activate DA
+
+DA -> DB: CALL CTS_DC_MatchMonitor_RuleFixedGame_StagingClean\n(ip_LiveIndicator, ip_MaxSequenceID)
+activate DB
+
+DB -> DB: DELETE FROM\nMatchMonitorStagingFixedGame[Live/NonLive]\nWHERE SequenceID <= MaxSequenceID
+
+DB -> DB: UPDATE SystemParameter\nSET ParameterValue = MaxSequenceID
+
+DB --> DA: Success
+deactivate DB
+
+DA --> Service: Success
+deactivate DA
+
+Service --> JobService: Success
+deactivate Service
+
+JobService --> Job: Return true (Success)
+deactivate JobService
+
+@enduml
+

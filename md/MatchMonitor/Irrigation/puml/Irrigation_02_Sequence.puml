@@ -1,0 +1,172 @@
+@startuml Irrigation_Sequence
+!theme plain
+title Match Monitor - Irrigation Detection - Sequence Diagram
+
+actor "Background Job\n(Scheduler)" as Job
+participant "MatchMonitorController\n(API)" as Controller
+participant "MatchMonitorJobService\n(Service)" as JobService
+participant "MatchMonitorServices\n(Business Logic)" as MMServices
+participant "MatchMonitorDataAccess\n(Data Access)" as DataAccess
+database "CTS MySQL\n(Staging - Pool 2006)" as Staging
+database "CTS MySQL\n(Match Monitor Tables)" as CTSDB
+
+== API Call ==
+
+Job -> Controller : POST /MatchMonitorProcessRuleIrrigationNonLive\n(numberOfThread=4)
+activate Controller
+
+Controller -> JobService : ProcessRuleIrrigation(isLive=false, numberOfThread=4)
+activate JobService
+
+== Phase 1: Get Staging Matches ==
+
+JobService -> MMServices : GetMatchMonitorRuleIrrigation(isLive=false)
+activate MMServices
+
+MMServices -> DataAccess : GetMatchMonitorRuleIrrigation(isLive=false)
+activate DataAccess
+
+DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleIrrigation_Get\n(@ip_LiveIndicator=0, @op_MaxSequenceID)
+activate Staging
+
+Staging -> Staging : SELECT from MatchMonitorStagingIrrigationNonLive\nWHERE SequenceID > LastScannedSequenceID\nGROUP BY MatchID, ScoreDiff, BettypeID,\n         BetID, HDP, Betteam\nLIMIT 5000
+
+Staging --> DataAccess : MatchStagingList (grouped) + MaxSequenceID
+deactivate Staging
+
+DataAccess --> MMServices : MatchMonitorRuleIrrigationModel\n(MatchStagingList, MaxSequenceID)
+deactivate DataAccess
+
+MMServices --> JobService : MatchMonitorRuleIrrigationModel
+deactivate MMServices
+
+== Phase 2: Process Each Match (Parallel) ==
+
+note over JobService
+  Process all match groups in parallel
+  (4 threads by default)
+  
+  KEY: NO Association Detection!
+end note
+
+par Match Group 1
+  JobService -> MMServices : InsertMatchMonitorRuleIrrigation(\nisLive=false,\nmaxSequenceID,\nmatchInfo1)
+  activate MMServices
+  
+  MMServices -> DataAccess : InsertMatchMonitorRuleIrrigation(\nisLive=false,\nmaxSequenceID,\nmatchInfo1)
+  activate DataAccess
+  
+  DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleIrrigation_Process\n(@ip_MatchID,\n@ip_ScoreDiff,\n@ip_BettypeID,\n@ip_BetID,\n@ip_HDP,\n@ip_Betteam)
+  activate Staging
+  
+  Staging -> Staging : Get all tickets for match\nGROUP BY CustID (per customer)\nCalculate Old Groups (existing patterns)\nCalculate New Groups (current batch)\nMerge if within TimeStep (180s)
+  
+  Staging -> Staging : For each customer:\n- Calculate Total Stake\n- Calculate Odds Spread\n  - Same sign: |MAX-MIN| * 100\n  - Mixed sign: ((1-MinPos)+(1-MinNeg)) * 100\n- Validate TotalStake >= $1000\n- Validate OddsSpread >= 28%
+  
+  alt Customer Detected
+    Staging --> DataAccess : List of detected customers\n(with irrigation pattern)
+  else Not Detected
+    Staging --> DataAccess : Empty list
+  end
+  deactivate Staging
+  
+  DataAccess --> MMServices : MatchRuleIrrigationCompletedModel[]
+  deactivate DataAccess
+  
+  alt Has Detected Customers
+    MMServices --> JobService : Detected customer groups
+  else No Detection
+    MMServices --> JobService : null/empty
+  end
+  deactivate MMServices
+  
+else Match Group 2, 3, 4...
+  note over JobService
+    Same flow for other match groups
+    (executed in parallel)
+    
+    NO Association Detection for ANY match!
+  end note
+end
+
+note over JobService
+  Sleep 50ms between matches
+end note
+
+== Phase 3: Complete & Save ==
+
+alt Has Detected Customers
+  JobService -> MMServices : UpdateMatchMonitorRuleIrrigationComplete(\nMatchMonitorRuleIrrigationCompleteParaModel)
+  activate MMServices
+  
+  note right of MMServices
+    Parameters:
+    - IsLive = false
+    - MatchInfo (Match/Bettype/HDP/etc)
+    - TransGroupJson (serialized detected customers)
+    - MaxSequenceID
+  end note
+  
+  MMServices -> DataAccess : UpdateMatchMonitorRuleIrrigationComplete(para)
+  activate DataAccess
+  
+  DataAccess -> CTSDB : CALL CTS_DC_MatchMonitor_RuleIrrigation_Complete\n(@ip_TransGroupJson, ...)
+  activate CTSDB
+  
+  CTSDB -> CTSDB : Parse TransGroupJson\nINSERT INTO CTSMatchMonitor\n(Reason='IR')\nINSERT INTO CTSMatchMonitorDetail
+  
+  CTSDB --> DataAccess : Success
+  deactivate CTSDB
+  
+  DataAccess --> MMServices : Done
+  deactivate DataAccess
+  
+  MMServices --> JobService : Done
+  deactivate MMServices
+end
+
+== Phase 4: Clean Staging ==
+
+JobService -> MMServices : CleanTransRuleIrrigation(isLive=false, maxSequenceID)
+activate MMServices
+
+MMServices -> DataAccess : CleanTransRuleIrrigation(isLive=false, maxSequenceID)
+activate DataAccess
+
+DataAccess -> Staging : CALL CTS_DC_MatchMonitor_RuleIrrigation_TransClean\n(@ip_MaxSequenceID)
+activate Staging
+
+Staging -> Staging : DELETE FROM MatchMonitorStagingIrrigationNonLive\nWHERE SequenceID <= MaxSequenceID
+
+Staging --> DataAccess : Success
+deactivate Staging
+
+DataAccess --> MMServices : Done
+deactivate DataAccess
+
+MMServices --> JobService : Done
+deactivate MMServices
+
+== Return Result ==
+
+JobService --> Controller : true
+deactivate JobService
+
+Controller --> Job : HTTP 200 OK
+deactivate Controller
+
+note right of Job
+  **Next Steps:**
+  1. Classification jobs read from CTSMatchMonitor
+     (Reason = 'IR')
+  2. Customers with irrigation pattern are classified
+  3. Website displays irrigation matches
+  
+  **Key Difference:**
+  - NO Association Detection anywhere in flow!
+  - Only individual customer analysis
+  - Simplest detection rule in Match Monitor
+end note
+
+@enduml
+

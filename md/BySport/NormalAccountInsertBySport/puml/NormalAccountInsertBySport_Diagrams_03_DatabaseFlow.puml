@@ -1,0 +1,142 @@
+@startuml NormalAccountInsertBySport_DatabaseFlow
+!theme plain
+title Normal Account Insert By Sport - Database Flow
+
+start
+
+:NormalAccountInsertBySportJobService.Execute();
+
+:GetNormalClassificationBySport();
+
+partition "SQL Server (bodb_VR2Model)" {
+    :Call SP: CTS_BySportNormalClassification_NormalAccount_Get;
+    note right
+        Input: @ScannedMaxId (OUTPUT)
+        Gets last scanned RowVersion from CustomerClassification_Parameter
+        Gets next scanned RowVersion from CustomerClassification_BySport
+        Selects TOP 10000 records where RowVersion > LastScannedRow
+        AND RowVersion <= NextScannedRow
+        Returns: CustId, SportGroup, CategoryId, TurnoverRM, WinlossRM, BetCount, ActiveDays, PerformanceTime
+        Output: @ScannedMaxId (Max RowVersion)
+    end note
+    
+    :Read CustomerClassification_BySport;
+    note right
+        Table: CustomerClassification_BySport
+        Filter: RowVersion > LastScannedRow AND RowVersion <= NextScannedRow
+        Order by: RowVersion ASC
+        Limit: TOP 10000
+    end note
+    
+    :Read CustomerClassification_Parameter;
+    note right
+        Table: CustomerClassification_Parameter
+        DataId = 2 (BYSPORT_LASTSCANNEDROW)
+        Get: Value (LastScannedRow)
+    end note
+}
+
+if (Has customers?) then (yes)
+    partition "Process Customers" {
+        :Chunk customers (batchInternalSize = 5000);
+        :Process in parallel (4 threads);
+        
+        partition "For Normal Accounts (CategoryId != -1)" {
+            partition "MySQL (CTS_DataCenter)" {
+                :Call SP: CTS_DC_CustClassification_BySport_Insert;
+                note right
+                    InputFlowID: 332 (BySportInsertNormal)
+                    CustInfo: JSON array of customers
+                end note
+                
+                :Call SP: CTS_DC_CustClassification_BySport_Insert_GetInfo;
+                note right
+                    Parse JSON and insert into Temp_NewClassification
+                    Join with CTSCustomer to get CTSCustID
+                    Join with SpecialCustomerClass_BySport to get SpecialCC
+                    Mark IsExistPA if customer has PA classification
+                end note
+                
+                :Call SP: CTS_DC_CustClassification_BySport_Insert_PreProcess;
+                note right
+                    For Normal accounts only
+                    Get TargetCC from CategoryMapping
+                    Calculate IsDataChanged
+                    Set IsReturnData = 1
+                end note
+                
+                :Call SP: CTS_DC_CustClassification_BySport_Insert_Process;
+                note right
+                    Insert/Update CTSCustomerClassification_BySport
+                    Insert into History table
+                    Insert into Log table
+                end note
+                
+                :Call SP: CTS_DC_CustClassification_BySport_Insert_Complete;
+                note right
+                    Update CTSCustomerClassification_BySport
+                    Set LastModifiedDate
+                end note
+                
+                :Write CTSCustomerClassification_BySport;
+                note right
+                    Insert new or update existing
+                    Fields: CustID, SportID, CategoryID, ParentID, etc.
+                end note
+                
+                :Write CTSCustomerClassification_BySport_History;
+                note right
+                    Insert history record
+                    Fields: ActionType, Remark, etc.
+                end note
+                
+                :Write CTSCustomerClassification_BySport_Log;
+                note right
+                    Insert log record
+                end note
+            }
+            
+            partition "Main DB" {
+                :PushCCBySportToMainDB();
+                note right
+                    Push classification data to Main DB
+                    Batch size: batchExternalSize
+                end note
+            }
+        }
+        
+        partition "For Special CC (CategoryId == -1)" {
+            partition "Main DB" {
+                :PushCCBySportToMainDB();
+                note right
+                    Push Special CC data to Main DB
+                    No insert to CTS_DataCenter
+                    Only push to Main DB
+                end note
+            }
+        }
+    }
+    
+    partition "SQL Server (bodb_VR2Model)" {
+        :Call SP: CTS_BySportNormalClassification_NormalAccount_Complete;
+        note right
+            Input: @ScannedMaxId
+            Updates CustomerClassification_Parameter
+            Sets Value = @ScannedMaxId
+            DataId = 2 (BYSPORT_LASTSCANNEDROW)
+        end note
+        
+        :Update CustomerClassification_Parameter;
+        note right
+            Table: CustomerClassification_Parameter
+            DataId = 2
+            Value = @ScannedMaxId
+        end note
+    }
+else (no)
+endif
+
+stop
+
+@enduml
+

@@ -1,0 +1,111 @@
+@startuml DailyNormalClassification_MainFlow
+!theme plain
+title Daily Normal Classification - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationJobs/scanningDailyNormalClassification
+    No parameters required
+end note
+
+:DailyNormalClassificationJobService.Execute();
+
+:Log: "Daily Normal Service is running";
+
+repeat
+  :Start();
+    :Initialize scanningCustomers entity;
+  
+  :GetCustomerForDailyNormalScanning();
+    :Call CTS_DC_CustClassification_DailyScan_GetNormal [SP];
+    note right
+        Database: CTS_DataCenter (MySQL)
+        
+        Input (from SystemParameter):
+        - LastCategoryID (ParameterID = 85)
+        - LastCustID (ParameterID = 86)
+        
+        Logic:
+        - Find next category to scan
+        - Based on scan interval
+        - Get customers where CustID > LastCustID
+        - Filter by LastScannedDate >= interval
+        - Filter active customers
+        
+        Output:
+        - @op_LastCategoryID (new position)
+        - @op_LastCustID (new position)
+        
+        Returns:
+        - List of CustID (long)
+    end note
+  
+  if (Has Customers?) then (yes)
+    :Join CustIds to comma-separated string;
+    
+    :ClassifyDailyNormal(custIds);
+      :Call CTS_GeneralNormalClassification_Daily_Preprocess [SP];
+      note right
+          Database: bodb_VR2Model (SQL Server)
+          Timeout: 1200 seconds (20 minutes)
+          
+          Parameters:
+          - @ListCustId (comma-separated)
+          
+          Logic:
+          - Parse customer ID list
+          - Get Priority from Priority table
+            * GroupId = 1 (General)
+            * FunctionId = 2 (Daily)
+          - Call NormalPool_Insert
+          - INSERT INTO Normal Pool:
+            * CustId
+            * Priority (Daily priority)
+            * FunctionId = 2
+            * GroupId = 1
+            * IsProcessed = 0
+            * CreatedDate = NOW()
+          - Prevent duplicates
+      end note
+    
+    :UpdateLastScan();
+      :Update SystemParameter (ParameterID = 85);
+      note right
+          DailyNormalClassificationLastCategoryID
+          = op_LastCategoryID
+      end note
+      
+      :Update SystemParameter (ParameterID = 86);
+      note right
+          DailyNormalClassificationLastCustID
+          = op_LastCustID
+      end note
+      
+      :Set isContinue = true;
+  else (no)
+    :Set isContinue = false;
+    note right
+        No more customers to scan
+        (All categories processed or
+         no categories due for scan)
+    end note
+  endif
+
+repeat while (isContinue = true?)
+
+:Return Success;
+stop
+
+note bottom
+  **Key Points**:
+  1. **Incremental Scanning**: Uses LastCategoryID + LastCustID
+  2. **Category-Based**: Scans one category at a time
+  3. **Scan Intervals**: Only scans categories due for scan
+  4. **Normal Pool**: Inserts customers for later classification
+  5. **Do-While Loop**: Continues until no more customers
+  6. **System Parameter**: Persists progress between executions
+end note
+
+@enduml
+

@@ -1,0 +1,243 @@
+@startuml Irrigation_DatabaseFlow
+!theme plain
+title Match Monitor - Irrigation Detection - Database Flow (All SPs)
+
+!define DB_COLOR #E3F2FD
+!define SP_COLOR #FFF9C4
+!define TABLE_COLOR #C8E6C9
+
+' Databases
+database "CTS_DataCenter" DB_COLOR {
+  rectangle "SystemParameter" as SysParam TABLE_COLOR
+  rectangle "MatchMonitorRuleSetting" as RuleSetting TABLE_COLOR
+  rectangle "MatchMonitorStagingIrrigationNonLive\n(Pool 2006)" as Staging TABLE_COLOR
+  rectangle "CTSMatchMonitor" as Match TABLE_COLOR
+  rectangle "CTSMatchMonitorDetail" as Detail TABLE_COLOR
+}
+
+' Stored Procedures
+rectangle "**Stored Procedures**" SP_COLOR {
+  rectangle "SP 1: RuleIrrigation_Get\n(Get staging matches)" as SP1 #FFEB3B
+  rectangle "SP 2: RuleIrrigation_Process\n(Detect irrigation pattern)" as SP2 #FFEB3B
+  rectangle "SP 3: RuleIrrigation_Complete\n(Save results)" as SP3 #FFEB3B
+  rectangle "SP 4: RuleIrrigation_TransClean\n(Clean staging)" as SP4 #FFEB3B
+}
+
+' SP1: Get staging matches
+SP1 -down-> SysParam : READ LastScannedSequenceID\n(ParameterID = 125)\nREAD BatchSize\n(ParameterID = 124)
+SP1 -down-> RuleSetting : READ MinTimeStep\n(RuleGroupID = 4)
+SP1 -down-> Staging : **SELECT** matches\nWHERE SequenceID > LastScannedSequenceID\nGROUP BY MatchID, ScoreDiff, BettypeID,\n         BetID, HDP, Betteam\nLIMIT 5000
+
+note bottom of SP1
+  **Input:**
+  - @ip_LiveIndicator = 0 (NonLive only)
+  
+  **Output:**
+  - MatchStagingList (grouped by match characteristics)
+  - @op_MaxSequenceID
+  
+  **Logic:**
+  1. Get LastScannedSequenceID and BatchSize
+  2. Get MinTimeStep from rule settings
+  3. Calculate MaxTransDate based on TimeStep
+  4. Query staging table for matches
+  5. Group by match characteristics
+  6. Return distinct match groups + MaxSequenceID
+  
+  **Key**: NO filtering by customer or association
+end note
+
+' SP2: Process Rule
+SP2 -down-> Staging : **SELECT** all tickets\nWHERE MatchID, ScoreDiff, BettypeID,\n      BetID, HDP, Betteam match\nAND SequenceID <= MaxSequenceID
+SP2 -down-> RuleSetting : **READ** TimeStep, TotalStake, OddsSpread\n(RuleGroupID = 4, SportType)
+SP2 -down-> SysParam : **READ** LastScannedSequenceID\n(ParameterID = 125)
+
+note bottom of SP2
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_MaxSequenceID
+  - @ip_SportType, @ip_MatchID, @ip_ScoreDiff
+  - @ip_BettypeID, @ip_BetID, @ip_HDP, @ip_Betteam
+  
+  **Logic:**
+  1. Get all tickets for this match characteristic
+  2. Get rule settings (TimeStep=180s, TotalStake=$1000, OddsSpread=28%)
+  3. Calculate Old Groups (tickets <= LastScannedSequenceID)
+     - GROUP BY CustID
+     - Aggregate: MaxTransDate, TotalStake, Odds range
+  4. Calculate New Groups (tickets > LastScannedSequenceID)
+     - GROUP BY CustID
+     - Aggregate: MinTransDate, TotalStake, Odds range
+  5. Merge if TimeGap <= TimeStep
+  6. For each customer:
+     a. Check Total Stake >= $1000
+     b. Calculate Odds Spread (same sign vs mixed sign)
+     c. Check Odds Spread >= 28%
+  7. Mark detected customers with GroupID = 1
+  
+  **Output:**
+  - List of detected customers with irrigation pattern
+  
+  **KEY: NO Association Detection!**
+  - Only analyze INDIVIDUAL customers
+  - No Device/AI/IP queries
+  - No cross-customer grouping
+end note
+
+' SP3: Complete
+SP3 -down-> Match : **INSERT** detected matches\n(Reason = 'IR')
+SP3 -down-> Detail : **INSERT** ticket details
+
+note bottom of SP3
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_TransGroupJson (detected customers)
+  - @ip_MaxSequenceID
+  - Match info (MatchID, ScoreDiff, BettypeID, etc.)
+  
+  **Logic:**
+  1. Parse TransGroupJson
+     Format: [
+       {
+         "CustID": 12345,
+         "GroupID": 1,
+         "TotalStake": 1500,
+         "TransIDList": "...",
+         ...
+       }
+     ]
+  2. INSERT into CTSMatchMonitor:
+     - MatchID, ScoreDiff, BettypeID, BetID, HDP, Betteam
+     - GroupID (unique per customer)
+     - Reason = 'IR' (Irrigation)
+     - TransIDList, CustIDList
+     - TotalStake, OddsSpread
+  3. INSERT into CTSMatchMonitorDetail:
+     - All tickets for each customer
+     - Link to CTSMatchMonitor via MatchID+GroupID
+  
+  **Tables Updated:**
+  - CTSMatchMonitor (match level, per customer)
+  - CTSMatchMonitorDetail (ticket level)
+end note
+
+' SP4: Clean
+SP4 -down-> Staging : **DELETE** processed tickets\nWHERE SequenceID <= MaxSequenceID
+
+note bottom of SP4
+  **Input:**
+  - @ip_LiveIndicator = 0
+  - @ip_MaxSequenceID
+  
+  **Logic:**
+  1. DELETE from MatchMonitorStagingIrrigationNonLive
+  2. WHERE SequenceID <= MaxSequenceID
+  3. Free space for next batch
+  
+  **Purpose:**
+  - Clean processed tickets
+  - Prevent duplicate processing
+  - Maintain staging table size
+end note
+
+' Flow annotations
+note as N1
+  **Complete Flow Sequence:**
+  
+  1. SP1: Get Staging Matches
+     └─ Read: SystemParameter, RuleSetting, Staging
+     └─ Output: MatchStagingList + MaxSequenceID
+  
+  2. SP2: Process Rule (NO Association!)
+     ├─ Read: Staging tickets per match
+     ├─ Group by Customer (CustID)
+     ├─ Calculate Old + New groups
+     ├─ Merge if within TimeStep
+     ├─ Validate: TotalStake >= $1000
+     ├─ Calculate Odds Spread (2 formulas)
+     ├─ Validate: OddsSpread >= 28%
+     └─ Output: Detected customers
+  
+  3. SP3: Complete (Save Results)
+     ├─ Parse TransGroupJson
+     ├─ INSERT: CTSMatchMonitor (Reason='IR')
+     └─ INSERT: CTSMatchMonitorDetail
+  
+  4. SP4: Clean Staging
+     └─ DELETE processed tickets from staging
+end note
+
+' Table details
+note right of Staging
+  **MatchMonitorStagingIrrigationNonLive**
+  (Pool 2006)
+  
+  Source: Insert Ticket Detail job
+  Frequency: Every 5 minutes
+  
+  Key Fields:
+  - SequenceID (incremental)
+  - MatchID, ScoreDiff, BettypeID, BetID, HDP, Betteam
+  - CustID, Stake, Odds
+  - TransDate, TransID
+  - SignNumber (sign of odds: +1 or -1)
+end note
+
+note right of Match
+  **CTSMatchMonitor**
+  
+  Stores detected irrigation patterns
+  
+  Key Fields:
+  - MatchID, GroupID (PK)
+    (GroupID = per customer)
+  - Reason = 'IR' (Irrigation)
+  - ScoreDiff, BettypeID, BetID, HDP, Betteam
+  - CustID (single customer!)
+  - TransIDList (comma-separated)
+  - TotalStake, OddsSpread
+  - InsertTime
+end note
+
+note right of Detail
+  **CTSMatchMonitorDetail**
+  
+  Stores individual tickets
+  
+  Key Fields:
+  - MatchID, GroupID, TransID (PK)
+  - CustID (same customer as CTSMatchMonitor)
+  - Stake, Odds
+  - TransDate
+  - Reason = 'IR'
+end note
+
+note right of RuleSetting
+  **MatchMonitorRuleSetting**
+  (RuleGroupID = 4)
+  
+  Default Settings:
+  - TimeStep: 180 seconds (3 min)
+  - TotalStake: $1000
+  - OddsSpread: 28%
+  - SportType: Soccer (1)
+  - Reason: 58 (Irrigation)
+end note
+
+note as N2
+  **KEY DIFFERENCE:**
+  
+  Unlike other rules (GB, Saba GB, Hedging, Arbitrage, Parlay),
+  Irrigation does NOT query association tables:
+  
+  ❌ NO CTS_DC_Association_Device_Get
+  ❌ NO CTS_DC_Association_AI_Get
+  ❌ NO CTS_DC_Association_IP_Get
+  
+  ✅ Only queries staging table
+  ✅ Only groups by CustID
+  ✅ Simplest database flow
+end note
+
+@enduml
+

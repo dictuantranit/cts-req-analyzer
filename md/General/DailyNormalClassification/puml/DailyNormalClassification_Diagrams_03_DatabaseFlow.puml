@@ -1,0 +1,194 @@
+@startuml DailyNormalClassification_DatabaseFlow
+!theme plain
+title Daily Normal Classification - Database Flow
+
+start
+
+partition "Step 1: Get Customers for Scanning" {
+  :Read SystemParameter (ParameterID = 85, 86);
+  note right
+      **DailyNormalClassificationLastCategoryID**
+      **DailyNormalClassificationLastCustID**
+      
+      These track the scanning position
+  end note
+  
+  :Call SP: CTS_DC_CustClassification_DailyScan_GetNormal;
+  note right
+      **Database**: CTS_DataCenter (MySQL)
+      
+      **Output Parameters**:
+      - @op_LastCategoryID (INT, OUTPUT)
+      - @op_LastCustID (BIGINT, OUTPUT)
+  end note
+  
+  :Find next category to scan;
+  note right
+      Logic:
+      - Get categories with scan interval
+      - Find category where:
+        * CategoryID >= LastCategoryID
+        * LastScannedDate + ScanInterval <= NOW()
+      - If no category found, wrap to first category
+  end note
+  
+  :Get customers from category;
+  note right
+      SELECT CustID
+      FROM CTSCustomerClassification
+      WHERE CategoryID = SelectedCategory
+        AND CustID > LastCustID
+        AND (
+          LastScannedDate IS NULL
+          OR LastScannedDate + ScanInterval <= NOW()
+        )
+        AND IsActive = 1
+        AND HasRecentTransactions = 1
+      ORDER BY CustID ASC
+      LIMIT BatchSize;
+      
+      **Filters**:
+      - Incremental by CustID
+      - Due for scan (interval check)
+      - Active customers only
+      - Has recent betting activity
+  end note
+  
+  :Return customer list + output params;
+  note right
+      **Returns**:
+      - List of CustID
+      
+      **Output**:
+      - op_LastCategoryID = Current category
+      - op_LastCustID = Last CustID in batch
+        (or 0 if category complete)
+  end note
+}
+
+if (Has Customers?) then (yes)
+  
+  partition "Step 2: Preprocess Customers" {
+    :Join CustIds to comma-separated string;
+    
+    :Call SP: CTS_GeneralNormalClassification_Daily_Preprocess;
+    note right
+        **Database**: bodb_VR2Model (SQL Server)
+        **Timeout**: 1200 seconds (20 minutes)
+        
+        **Parameters**:
+        - @ListCustId (VARCHAR(MAX))
+          Format: "123,456,789,..."
+    end note
+    
+    :Parse customer ID list;
+    note right
+        CREATE TABLE #tmpCustomers (
+          CustId BIGINT
+        );
+        
+        INSERT INTO #tmpCustomers
+        SELECT CAST(value AS BIGINT)
+        FROM STRING_SPLIT(@ListCustId, ',');
+    end note
+    
+    :Get Priority from Priority table;
+    note right
+        DECLARE @Priority INT;
+        
+        SELECT TOP 1 @Priority = Priority
+        FROM CustomerClassification_Priority
+        WHERE GroupId = 1      -- General
+          AND FunctionId = 2;  -- Daily
+        
+        Typical Daily priority: ~100
+        (Lower than Realtime: ~200)
+    end note
+    
+    :Insert into Normal Pool;
+    note right
+        EXEC CTS_GeneralNormalClassification_NormalPool_Insert
+          @CustomerList = #tmpCustomers,
+          @Priority = @Priority,
+          @FunctionId = 2,  -- Daily
+          @GroupId = 1;     -- General
+        
+        This inserts:
+        INSERT INTO CustomerClassification_NormalPool
+          (CustId, Priority, FunctionId, GroupId, 
+           CreatedDate, IsProcessed)
+        SELECT 
+          tc.CustId,
+          @Priority,
+          2,  -- Daily
+          1,  -- General
+          GETDATE(),
+          0   -- Not processed
+        FROM #tmpCustomers tc
+        LEFT JOIN CustomerClassification_NormalPool np
+          ON tc.CustId = np.CustId
+          AND np.IsProcessed = 0
+        WHERE np.CustId IS NULL;  -- Prevent duplicates
+    end note
+  }
+  
+  partition "Step 3: Update System Parameters" {
+    :Update ParameterID = 86;
+    note right
+        UPDATE SystemParameter
+        SET ParameterValue = @op_LastCustID,
+            LastModifiedDate = NOW()
+        WHERE ParameterID = 86;
+        
+        **Parameter**: DailyNormalClassificationLastCustID
+    end note
+    
+    :Update ParameterID = 85;
+    note right
+        UPDATE SystemParameter
+        SET ParameterValue = @op_LastCategoryID,
+            LastModifiedDate = NOW()
+        WHERE ParameterID = 85;
+        
+        **Parameter**: DailyNormalClassificationLastCategoryID
+    end note
+    
+    :Set isContinue = true;
+  }
+  
+else (no)
+  :Set isContinue = false;
+  note right
+      No more customers to scan
+  end note
+endif
+
+:Return isContinue;
+
+stop
+
+note bottom
+  **Database Interactions**:
+  1. **DataCenter (MySQL)**: 
+     - Read SystemParameter
+     - Get customers for scanning
+     - Category-based incremental scan
+  
+  2. **VR2 (SQL Server)**: 
+     - Insert into Normal Pool
+     - Priority assignment
+     - Duplicate prevention
+  
+  3. **SystemParameter Updates**:
+     - Persist scanning position
+     - Enable resumption on next execution
+  
+  **Key Mechanism**:
+  - Incremental scanning by Category + CustID
+  - Category wraps around when complete
+  - Normal Pool acts as queue for classification
+  - Daily priority < Realtime priority
+end note
+
+@enduml
+

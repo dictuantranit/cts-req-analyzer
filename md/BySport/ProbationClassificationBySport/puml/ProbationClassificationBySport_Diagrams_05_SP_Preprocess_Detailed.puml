@@ -1,0 +1,79 @@
+@startuml ProbationClassificationBySport_SP_Preprocess_Detailed
+!theme plain
+title Probation Classification By Sport - SP Preprocess Detailed Flow
+
+start
+:CTS_BySportNormalClassification_Probation_Preprocess;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Parameter: @CustomersXML (XML)
+end note
+
+:Initialize Variables;
+note right
+    @FunctionId = 2
+    @ToDate = GETDATE()
+    @From30Date = DATEADD(DAY, -29, @ToDate)
+    @Priority_GroupId = 1
+    @Priority_ActionUnknown = 9999
+end note
+
+:Create Temp Table;
+note right
+    #tmpCustomers:
+    - CustId (INT)
+    - SportGroup (INT)
+    - PRIMARY KEY (CustId, SportGroup)
+end note
+
+:Parse XML Customer List;
+note right
+    INSERT INTO #tmpCustomers
+    SELECT
+      T.C.value('./@CustId', 'INT') AS CustId
+      , T.C.value('./@SportGroup', 'SMALLINT') AS SportGroup
+    FROM @CustomersXML.nodes('//r') AS T(C)
+end note
+
+:Remove Disabled Accounts;
+note right
+    DELETE FROM #tmpCustomers AS r
+    INNER JOIN bodb02.dbo.custInfo AS c
+      ON r.CustId = c.custid
+    WHERE c.[Enabled] = 0
+end note
+
+:Remove Inactive Customers;
+note right
+    DELETE FROM #tmpCustomers AS r
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM CustomerClassification_BySport_LatestActiveDay AS c
+        WHERE c.CustId = r.CustId
+          AND c.SportGroup = r.SportGroup
+          AND c.LastTransDate >= @From30Date
+    )
+end note
+
+:Get Priority;
+note right
+    SELECT ISNULL(p.[Priority], @Priority_ActionUnknown)
+    FROM CustomerClassification_BySport_Priority AS p
+    WHERE p.GroupId = @Priority_GroupId
+      AND p.FunctionId = @FunctionId
+    @Priority
+end note
+
+:Insert into Normal Pool;
+note right
+    EXEC CTS_BySportNormalClassification_NormalPool_Insert
+    @FunctionId = @FunctionId
+    @Priority = @Priority
+    Insert customers into Normal Pool
+    for later classification processing
+end note
+
+stop
+
+@enduml
+

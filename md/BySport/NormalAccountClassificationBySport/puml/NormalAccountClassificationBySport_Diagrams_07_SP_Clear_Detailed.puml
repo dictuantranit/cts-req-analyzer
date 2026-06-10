@@ -1,0 +1,56 @@
+@startuml NormalAccountClassificationBySport_SP_Clear_Detailed
+!theme plain
+title Normal Account Classification By Sport - SP Clear Detailed Flow
+
+start
+:CTS_BySportNormalClassification_NormalPool_Clear;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Parameters: @CustomersXML (XML), @ScannedMaxId (BIGINT)
+end note
+
+:Create Temp Tables;
+note right
+    #tmpCustomers:
+    - CustId (INT)
+    - SportGroup (SMALLINT)
+    - PRIMARY KEY (CustId, SportGroup)
+    
+    #tmpIDs:
+    - ID (BIGINT PRIMARY KEY)
+end note
+
+:Parse XML Customer List;
+note right
+    INSERT INTO #tmpCustomers
+    SELECT CustId, SportGroup
+    FROM @CustomersXML.nodes('//r')
+end note
+
+if (ScannedMaxId IS NOT NULL?) then (yes)
+    :Get IDs to Delete;
+    note right
+        INSERT INTO #tmpIDs
+        SELECT p.ID
+        FROM CustomerClassification_BySport_NormalPool AS p
+        INNER JOIN #tmpCustomers AS t
+          ON t.CustId = p.CustId
+         AND p.SportGroup = t.SportGroup
+        WHERE p.ID <= @ScannedMaxId
+    end note
+    
+    :Delete from NormalPool;
+    note right
+        DELETE FROM CustomerClassification_BySport_NormalPool
+        FROM #tmpIDs AS r
+        INNER LOOP JOIN CustomerClassification_BySport_NormalPool AS c
+          ON r.ID = c.ID
+    end note
+else (no)
+    :Skip deletion;
+endif
+
+stop
+
+@enduml
+

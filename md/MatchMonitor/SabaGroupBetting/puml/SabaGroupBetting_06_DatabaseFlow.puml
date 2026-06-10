@@ -1,0 +1,425 @@
+@startuml SabaGroupBetting_DatabaseFlow
+!theme plain
+title Match Monitor Saba Group Betting - Database Flow (Stored Procedures)
+
+|Application|
+start
+
+:Job Triggered;
+note right
+    HTTP POST to Controller
+    numberOfThread parameter
+end note
+
+|Database - Get Phase|
+:SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get;
+
+partition "Get Phase - Retrieve Matches" {
+    :Input Parameters;
+    note right
+        IN  ip_LiveIndicator (BOOLEAN)
+        OUT op_MaxSequenceID (BIGINT UNSIGNED)
+    end note
+    
+    :Get Rule Settings;
+    note right
+        **Query MatchMonitorRuleSetting:**
+        SELECT TimeStep
+        FROM MatchMonitorRuleSetting
+        WHERE RuleGroupID = 6  -- CONST_MMRULEGROUP_GROUPBETTINGSABA
+          AND Reason = 0       -- CONST_MMREASON_GROUPBETTINGSABA
+          AND RuleStatus = 1
+        
+        **Query SystemParameter:**
+        - ParameterID 162 (Live) or 163 (NonLive): LastSequenceID
+        - ParameterID 164: NoOfRow limit
+    end note
+    
+    :Calculate Time Window;
+    note right
+        **Get MaxSequenceID:**
+        1. Get last processed SequenceID from SystemParameter
+        2. Find next transaction after LastSequenceID
+        3. Calculate MaxTime = TransDateToSecond + TimeStep
+        4. Find MaxSequenceID where TransDateToSecond <= MaxTime
+        
+        **Tables:**
+        - MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+    end note
+    
+    if (Has New Transactions?) then (yes)
+        :Get Old Groups;
+        note right
+            **Temp_OldGroup:**
+            SELECT MatchID, ScoreDiff, BettypeID, BetID, Betteam, GroupID
+            FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+            WHERE SequenceID <= LastSequenceID
+              AND GroupID > 0
+            GROUP BY MatchID, ScoreDiff, BettypeID, BetID, Betteam, GroupID
+        end note
+        
+        :Get Grouped Matches;
+        note right
+            **Complex Query with Aggregation:**
+            
+            SELECT MatchID, SportType, ScoreDiff, BettypeID, BetID, Betteam,
+                   GROUP_CONCAT(DISTINCT CustID) AS CustIDList,
+                   GROUP_CONCAT(DISTINCT CTSCustID) AS CTSCustIDList,
+                   GROUP_CONCAT(CustSequenceIDList) AS SequenceIDList
+            FROM (
+                SELECT mms.*, tmpSt.TotalStake, tmpSt.CustStake,
+                       SUM(mms.Stake) AS CustStake,
+                       GROUP_CONCAT(mms.SequenceID) AS CustSequenceIDList
+                FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive] AS mms
+                INNER JOIN Temp_RuleSetting AS tmpSt 
+                    ON tmpSt.LeagueGroupID = mms.LeagueGroupID 
+                   AND tmpSt.SportType = mms.SportType
+                LEFT JOIN Temp_OldGroup AS tmpOg 
+                    ON mms.MatchID = tmpOg.MatchID 
+                   AND mms.ScoreDiff = tmpOg.ScoreDiff
+                   AND mms.BettypeID = tmpOg.BettypeID
+                   AND mms.BetID = tmpOg.BetID 
+                   AND mms.Betteam = tmpOg.Betteam
+                WHERE mms.SequenceID <= MaxSequenceID
+                GROUP BY mms.MatchID, mms.CustID, mms.CTSCustID
+                HAVING SUM(mms.Stake) >= tmpSt.CustStake
+            ) AS tmp
+            GROUP BY MatchID, SportType, ScoreDiff, BettypeID, BetID, Betteam
+            HAVING COUNT(DISTINCT CustID) > 1
+               AND SUM(CustStake) >= TotalStake
+        end note
+        
+        :Get Customer Mapping List;
+        note right
+            **CTSCustomerList (for MappingDictionary):**
+            SELECT DISTINCT CustID, CTSCustID
+            FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+            WHERE SequenceID <= MaxSequenceID
+        end note
+        
+        :Return Result Sets;
+        note right
+            **Result Set 1:** MatchStagingList
+            **Result Set 2:** CTSCustomerList
+            **OUT Parameter:** op_MaxSequenceID
+        end note
+        
+    else (no)
+        :Return Next SequenceID for cleanup;
+    endif
+}
+
+|Application|
+:Process Matches in Parallel;
+note right
+    Application layer processes:
+    - Create MappingCustDictionary
+    - Association Detection
+    - Round 1 and Round 2 processing
+    
+    **Note:** No "Process" SP used
+    Logic is in application code
+end note
+
+|Database - Complete Phase|
+:SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete;
+
+partition "Complete Phase - Save Results" {
+    :Input Parameters;
+    note right
+        IN ip_LiveIndicator (BOOLEAN)
+        IN ip_MaxSequenceID (BIGINT UNSIGNED)
+        IN ip_MatchID (INT)
+        IN ip_ScoreDiff (INT)
+        IN ip_BettypeID (INT)
+        IN ip_BetID (BIGINT)
+        IN ip_Betteam (VARCHAR(10))
+        IN ip_TransGroup (JSON)
+        
+        **JSON Structure:**
+        [
+            {
+                "GroupID": 1,
+                "CustIDList": "101,102,103",
+                "TransIDList": "254608225414938624,254608225414938626",
+                "HighStakeLicCustList": "101"
+            }
+        ]
+    end note
+    
+    :Parse JSON Input;
+    note right
+        **Create Temp Tables:**
+        - Temp_TransGroup
+        - Temp_GroupBettingSabaGroup
+        - Temp_GroupBettingSabaOldGroup
+        - Temp_GroupBettingSabaTrans
+        
+        **Parse JSON:**
+        INSERT INTO Temp_TransGroup
+        SELECT GroupID, CustIDList, TransIDList, HighStakeLicCustList
+        FROM JSON_TABLE(ip_TransGroup, '$[*]' COLUMNS(...))
+    end note
+    
+    :Get Match Info;
+    note right
+        **Query Staging for Match Details:**
+        SELECT EventDate, LiveHomeScore, LiveAwayScore,
+               KickOffTime, EventStatus, HomeID, AwayID,
+               LeagueID, LeagueName, LeagueGroupID, Sporttype
+        FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+        WHERE SequenceID <= ip_MaxSequenceID
+          AND MatchID = ip_MatchID
+          AND BettypeID = ip_BettypeID
+          AND BetID = ip_BetID
+          AND Betteam = ip_Betteam
+          AND ScoreDiff = ip_ScoreDiff
+        LIMIT 1
+    end note
+    
+    :Loop Through Groups;
+    repeat
+        :Get Group Data;
+        note right
+            SELECT GroupID, TransIDList, CustIDList, HighStakeLicCustList
+            FROM Temp_GroupBettingSabaGroup
+            ORDER BY GroupID ASC
+            LIMIT 1
+        end note
+        
+        :Split TransIDList;
+        note right
+            CALL CTS_DC_Sys_SplitStringToTempItemTable(
+                lv_TransIDList, ',', 'BIGINT'
+            )
+            
+            INSERT INTO Temp_GroupBettingSabaTrans
+            SELECT * FROM TempItemTable
+        end note
+        
+        :Check Existing Groups;
+        note right
+            **Find Old GroupIDs:**
+            INSERT INTO Temp_GroupBettingSabaOldGroup
+            SELECT DISTINCT GroupID
+            FROM Temp_GroupBettingSabaTrans AS tmpTs
+            INNER JOIN MatchMonitorStagingGroupBettingSaba[Live/NonLive] AS mms
+                ON mms.TransID = tmpTs.TransID
+        end note
+        
+        if (No Old Groups?) then (yes - New Group)
+            :Get Next GroupID;
+            note right
+                SELECT IFNULL(MAX(GroupID), 0) + 1
+                FROM MatchMonitorDetails
+                WHERE LiveIndicator = ip_LiveIndicator
+                  AND MatchID = ip_MatchID
+                  AND BettypeID = ip_BettypeID
+                  AND BetID = ip_BetID
+                  AND Betteam = ip_Betteam
+                  AND ScoreDiff = ip_ScoreDiff
+                  AND Reason = 0  -- CONST_MMREASON_GROUPBETTINGSABA
+            end note
+            
+            :INSERT New Group;
+            note right
+                **INSERT INTO MatchMonitorDetails:**
+                (MatchID, LiveIndicator, ScoreDiff, BettypeID, BetID, Betteam,
+                 EventDate, GroupID, LiveHomeScore, LiveAwayScore,
+                 ListCustID, ListTransID, HighStakeLicCustList, Reason)
+                VALUES (...)
+                
+                **Reason = 0 (GROUPBETTINGSABA)**
+            end note
+            
+        elseif (One Old Group?) then (yes - Update)
+            :Check if TransList is longer;
+            if (New TransList > Old TransList?) then (yes)
+                :UPDATE Existing Group;
+                note right
+                    UPDATE MatchMonitorDetails
+                    SET GroupID = TargetGroupID,
+                        ListCustID = lv_CustIDList,
+                        ListTransID = lv_TransIDList
+                    WHERE LiveIndicator = ip_LiveIndicator
+                      AND MatchID = ip_MatchID
+                      AND BettypeID = ip_BettypeID
+                      AND BetID = ip_BetID
+                      AND Betteam = ip_Betteam
+                      AND ScoreDiff = ip_ScoreDiff
+                      AND GroupID = TargetGroupID
+                      AND Reason = 0
+                end note
+            endif
+            
+        else (Multiple Old Groups - Merge)
+            :DELETE Old Groups;
+            note right
+                DELETE FROM MatchMonitorDetails
+                WHERE ... AND GroupID <> TargetGroupID
+            end note
+            
+            :UPDATE with Merged Data;
+            note right
+                UPDATE MatchMonitorDetails
+                SET GroupID = TargetGroupID,
+                    ListCustID = lv_CustIDList,
+                    ListTransID = lv_TransIDList
+                WHERE ... AND GroupID = TargetGroupID
+            end note
+        endif
+        
+        :UPDATE Staging GroupID;
+        note right
+            **Dynamic SQL:**
+            UPDATE MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+            SET GroupID = TargetGroupID
+            WHERE TransID IN (TransIDList)
+        end note
+        
+        :Remove Processed Group;
+        note right
+            DELETE FROM Temp_GroupBettingSabaGroup
+            WHERE GroupID = lv_GroupID
+        end note
+        
+    repeat while (More Groups?) is (yes)
+    -> no;
+    
+    :INSERT MatchMonitor Summary;
+    note right
+        **INSERT INTO MatchMonitor:**
+        (MatchID, BettypeID, BetID, LiveIndicator, EventDate,
+         KickOffTime, EventStatus, HomeID, AwayID,
+         LeagueID, LeagueName, LeagueGroupID, Sporttype, Reason)
+        SELECT ... FROM MatchMonitorDetails
+        WHERE ... AND Reason = 0
+        
+        **Summary table for quick lookup**
+    end note
+}
+
+|Application|
+:Wait for All Threads;
+
+|Database - Clean Phase|
+:SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean;
+
+partition "Clean Phase - Remove Old Data" {
+    :Input Parameters;
+    note right
+        IN ip_LiveIndicator (BOOLEAN)
+        IN ip_MaxSequenceID (BIGINT UNSIGNED)
+    end note
+    
+    :Get TimeStep Setting;
+    note right
+        SELECT TimeStep
+        FROM MatchMonitorRuleSetting
+        WHERE RuleGroupID = 6
+          AND RuleStatus = 1
+    end note
+    
+    :Calculate Time Windows;
+    note right
+        **Get ToTime and FromTime:**
+        
+        ToTime = MAX(TransDateToSecond)
+        WHERE SequenceID <= ip_MaxSequenceID
+        
+        FromTime = TransDateToSecond
+        WHERE TransDateToSecond >= ToTime - TimeStep
+        ORDER BY TransDateToSecond ASC
+        LIMIT 1
+    end note
+    
+    :Get Last TimeStep Groups;
+    note right
+        **Temp_LastGroupIDGroup:**
+        INSERT INTO Temp_LastGroupIDGroup
+        SELECT DISTINCT MatchID, ScoreDiff, BettypeID, BetID, Betteam, GroupID
+        FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+        WHERE SequenceID <= ip_MaxSequenceID
+          AND GroupID <> 0
+          AND TransDateToSecond BETWEEN FromTime AND ToTime
+    end note
+    
+    :Clean GroupID > 0 Transactions;
+    note right
+        **DELETE old groups NOT in last TimeStep:**
+        DELETE FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+        WHERE SequenceID <= ip_MaxSequenceID
+          AND GroupID > 0
+          AND TransDateToSecond < FromTime
+          AND (MatchID, ScoreDiff, BettypeID, BetID, Betteam, GroupID)
+              NOT IN (SELECT * FROM Temp_LastGroupIDGroup)
+    end note
+    
+    :Clean GroupID = 0 Transactions;
+    note right
+        **Iterative cleanup:**
+        WHILE EXISTS (transactions with GroupID = 0 before FromTime)
+        DO
+            1. Get last TimeStep customers
+            2. DELETE customers NOT in last TimeStep
+            3. Move time window backward
+            4. Repeat
+        END WHILE
+        
+        **Purpose:** Keep unprocessed transactions in last window
+    end note
+    
+    :Update SystemParameter;
+    note right
+        **Update checkpoint:**
+        UPDATE SystemParameter
+        SET ParameterValue = ip_MaxSequenceID
+        WHERE ParameterID = 162  -- Live
+           OR ParameterID = 163  -- NonLive
+        
+        **Next run starts from this SequenceID**
+    end note
+}
+
+|Application|
+:Return Success;
+
+stop
+
+note right
+    ===================================================
+    DATABASE FLOW SUMMARY
+    ===================================================
+    
+    **Stored Procedures:**
+    1. CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get
+       - Get matches within TimeStep window
+       - Return customer mapping list
+       - Calculate MaxSequenceID
+    
+    2. CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete
+       - Parse JSON group results
+       - INSERT/UPDATE/MERGE groups in MatchMonitorDetails
+       - UPDATE staging with GroupID
+       - INSERT summary to MatchMonitor
+    
+    3. CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean
+       - Clean old processed transactions
+       - Keep last TimeStep data
+       - Update checkpoint in SystemParameter
+    
+    **Key Tables:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - MatchMonitorStagingGroupBettingSabaNonLive
+    - MatchMonitorDetails (Reason=0)
+    - MatchMonitor
+    - MatchMonitorRuleSetting
+    - SystemParameter
+    
+    **Constants:**
+    - RuleGroupID = 6 (GROUPBETTINGSABA)
+    - Reason = 0 (GROUPBETTINGSABA)
+    - ParameterID 162 (Live), 163 (NonLive)
+end note
+
+@enduml

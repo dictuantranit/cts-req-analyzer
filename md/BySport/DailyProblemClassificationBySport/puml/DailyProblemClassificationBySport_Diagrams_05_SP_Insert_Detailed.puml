@@ -1,0 +1,117 @@
+@startuml DailyProblemClassificationBySport_SP_Insert_Detailed
+!theme plain
+title Daily Problem Classification By Sport - SP Insert Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_DailyScanPA_Insert;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Tables: Temp Tables, CTSCustomer, CTSCustomerClassification_BySport
+    CustomerCategory, CustomerCategorySettings
+    SpecialCustomerClass, CTSCustomerClassification_BySport_History
+    CTSCustomerClassification_BySport_Log
+    Parameter: @ip_ProblemAccount (JSON)
+end note
+
+:Get Constants;
+note right
+    CONST_CATEID_VVIP
+    CONST_CATEID_LICVIPSUSPICIOUS
+    CONST_CATEID_LICVIPDANGEROUS
+    CONST_CATEID_LICBA
+    CONST_PARENTID_PA
+    CONST_PARENTID_WRAPPER
+    CONST_REMARKID_PAAFFECTEDBYUPLINE
+    CONST_REMARKID_RESCANROBOT
+end note
+
+:Create Temp_PA Table;
+note right
+    Temp_PA:
+    - CustID, CTSCustID, SportGroup
+    - CategoryID, RelevantCategoryID
+    - ParentID, TargetCC
+    - WinlossStatus, IsDataChanged
+    - TurnoverRM, WinlossRM
+    - BetCount, ActiveDays
+    - IsLicenseeVIP, IsLicenseeBA
+    - IsRobot, PerformanceTime
+    - PRIMARY KEY (CustID, SportGroup, CategoryID)
+end note
+
+:Parse JSON and Get Current Classification;
+note right
+    JOIN CTSCustomerClassification_BySport
+    ON CustID AND SportID
+    JOIN CustomerCategory
+    ON CategoryID AND IsActive = 1
+    AND RelevantCategoryID IS NOT NULL
+end note
+
+:Determine IsDataChanged;
+note right
+    Logic:
+    - LOSING (0) + PA: Update (IsDataChanged = 1)
+    - LOSING (0) + Probation: No Change (IsDataChanged = 0)
+    - WINNING (2) + PA: No Change (IsDataChanged = 0)
+    - WINNING (2) + Probation: Update (IsDataChanged = 1)
+    - KEEPSTATE (1): No Change (IsDataChanged = 0)
+end note
+
+:Exclude VVIP Customers;
+note right
+    DELETE FROM Temp_PA
+    WHERE EXISTS
+      (SELECT 1 FROM CCBySport
+       WHERE CTSCustID = Temp_PA.CTSCustID
+         AND CategoryID = CONST_CATEID_VVIP)
+end note
+
+:Update Existing Classifications;
+note right
+    UPDATE CTSCustomerClassification_BySport
+    SET CategoryID = RelevantCategoryID
+    WHERE IsDataChanged = 1
+end note
+
+:Determine TargetCC;
+note right
+    Check SpecialCustomerClass
+    Determine TargetCC based on:
+    Priority:
+    1. SpecialCustomerClass (if exists)
+    2. IsLicenseeVIP + IsDangerProbation:
+       - Probation: LicVIP Suspicious
+       - PA: LicVIP Dangerous
+    3. IsLicenseeBA + Priority:
+       - Higher priority: LicBA
+    4. Default: TargetCC from RelevantCategory
+end note
+
+:Insert into History;
+note right
+    INSERT INTO CCHistory
+    (CustID, CTSCustID, SportID, CategoryID, etc.)
+    WHERE IsDataChanged = 1
+      AND ParentID <> CONST_PARENTID_WRAPPER
+end note
+
+:Insert into Log;
+note right
+    INSERT INTO CCLog
+    (CustID, CTSCustID, SportID, CategoryID, etc.)
+    For all records in Temp_PA
+end note
+
+:Return Changed Records;
+note right
+    SELECT DISTINCT
+    CustID, SportGroup
+    FROM Temp_PA
+    WHERE IsDataChanged = 1
+end note
+
+stop
+
+@enduml
+

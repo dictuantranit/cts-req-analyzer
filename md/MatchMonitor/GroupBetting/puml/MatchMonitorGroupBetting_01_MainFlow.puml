@@ -1,0 +1,195 @@
+@startuml MatchMonitorGroupBetting_MainFlow
+!theme plain
+title Match Monitor Group Betting - Main Business Flow (2 Phases)
+
+start
+
+partition "PHASE 1: STAGING - Insert Ticket Detail" {
+    :Job Triggered (HTTP POST);
+    note right
+        Endpoint: /api/matchmonitor/MatchMonitorInsertTicketDetailLive
+        or: /api/matchmonitor/MatchMonitorInsertTicketDetailNonLive
+        Parameter: size (batch size)
+    end note
+    
+    :MatchMonitorJobService.InsertTicketDetail(size, isLive);
+    
+    :MatchMonitorStagingService.Start(size, isLive);
+    note right
+        Initialize:
+        - BatchSize
+        - IsLive flag
+        - LastScannedSequenceID_ParameterID
+        - PoolEnumType
+    end note
+    
+    :GetLastScannedSequenceID();
+    note right
+        Get from SystemParameter:
+        - MatchMonitorLastScannedTrans (Live)
+        - MatchMonitorLastScannedTransNoneLive (Non-Live)
+    end note
+    
+    :GetMatchTrans();
+    :GetBetTypeSettings();
+    note right
+        FunctionID = MMBetType
+        Filter: IsFilterMMDetection = true
+        Get: SportTypeID, BetTypeID, BetChoiceType
+    end note
+    
+    :Call SP: GetTicketTrans();
+    note right
+        Database: MainDB (SQL Server)
+        Input: LastSequenceID, BatchSize, IsLive, BetTypeInfos
+        Output: List<TicketDetailEntity>
+        - SequenceID, MatchID, BetID, BettypeID
+        - CustID, CTSCustID, Amount, Odds
+        - Betteam, ScoreDiff, SportType
+    end note
+    
+    if (Has Tickets?) then (yes)
+        :Convert to JSON;
+        
+        :InsertMatchMonitorStagingWithParallel();
+        note right
+            Parallel insert to multiple pools:
+            - GroupBetting Pool (PoolType=1)
+            - Hedging Pool (PoolType=2)
+            - Arbitrage Pool (PoolType=3)
+            - etc.
+        end note
+        
+        fork
+            :Insert to Pool 1 (GroupBetting);
+            :Call SP: InsertStaging(JSON, isLive, PoolType=1);
+        fork again
+            :Insert to Pool 2 (Hedging);
+            :Call SP: InsertStaging(JSON, isLive, PoolType=2);
+        fork again
+            :Insert to Pool 3 (Arbitrage);
+            :Call SP: InsertStaging(JSON, isLive, PoolType=3);
+        fork again
+            :Insert to Pool N...;
+        end fork
+        
+        :UpdateLastScannedSequenceID();
+        note right
+            Update SystemParameter:
+            ParameterValue = MAX(SequenceID)
+            Prepare for next scan
+        end note
+    else (no)
+        :No tickets to process;
+    endif
+    
+    :Return Success;
+}
+
+note right
+    ===========================================
+    Phase 1 Complete: Tickets in Staging
+    Ready for Phase 2: Rule Processing
+    ===========================================
+end note
+
+partition "PHASE 2: PROCESSING - Detect Group Betting" {
+    :Job Triggered (HTTP POST);
+    note right
+        Endpoint: /api/matchmonitor/MatchMonitorProcessRuleGroupBettingLive
+        or: /api/matchmonitor/MatchMonitorProcessRuleGroupBettingNonLive
+        Parameters:
+        - numberOfThread
+        - sportsDevice, sportsAI, sportsIP
+        - sports3MatchesLast7Days, sportsIPLast3Days
+    end note
+    
+    :MatchMonitorJobService.ProcessRuleGroupBetting();
+    :Create MatchDetectAssociationSettingModel;
+    note right
+        Parse sport-specific settings:
+        - DeviceSports: "1,2,3,4,5"
+        - AISports: "1,2,3,4,5"
+        - IPSports: "1,2,3,4,5"
+        - 3MatchesLast7DaysSports: "1,2,3,4,5"
+        - IPLast3DaysSports: "1,2,3,4,5"
+    end note
+    
+    :GetMatchRuleGroupBetting(isLive);
+    :Call SP: RuleGroupBetting_Get(isLive);
+    note right
+        Database: CTS_DataCenter (MySQL)
+        Returns:
+        - MaxSequenceID
+        - MatchStagingList (grouped by Match+Bet)
+        Group by: MatchID, ScoreDiff, BettypeID, BetID, Betteam
+    end note
+    
+    if (Has Matches?) then (yes)
+        :Parallel Process Matches;
+        note right
+            AsParallel()
+            WithDegreeOfParallelism(numberOfThread)
+            Process multiple matches simultaneously
+        end note
+        
+        fork
+            :Process Match 1;
+            :PrepareProcess(matchInfo, isLive, assDetectSetting);
+            
+            :ProcessRound1();
+            note right
+                For each customer group in match:
+                1. Get CustIDList
+                2. Detect Association (Device, IP, AI, etc.)
+                3. If GroupID found → Add to results
+            end note
+            
+            :ProcessRound2();
+            note right
+                For matches needing reprocess:
+                1. Get subset CustIDList
+                2. Re-run association detection
+                3. Merge with Round 1 results
+            end note
+            
+            :Complete(maxSequenceID);
+            note right
+                1. Merge Round 1 & Round 2 results
+                2. Group by TransIDList (remove duplicates)
+                3. Assign GroupID (sequential)
+                4. Convert to JSON
+                5. Call SP: Complete
+            end note
+            
+        fork again
+            :Process Match 2;
+            :PrepareProcess → ProcessRound1 → ProcessRound2 → Complete;
+        fork again
+            :Process Match 3;
+            :PrepareProcess → ProcessRound1 → ProcessRound2 → Complete;
+        fork again
+            :Process Match N...;
+        end fork
+        
+        :Wait for all matches to complete;
+        
+        :CleanTransRuleGroupBetting(isLive, maxSequenceID);
+        :Call SP: RuleGroupBetting_Clean;
+        note right
+            Delete processed transactions:
+            - IsProcessed = 1
+            - SequenceID <= maxSequenceID
+            - ProcessedDate < NOW() - 7 days
+        end note
+    else (no)
+        :No matches to process;
+    endif
+    
+    :Return Success;
+}
+
+stop
+
+@enduml
+

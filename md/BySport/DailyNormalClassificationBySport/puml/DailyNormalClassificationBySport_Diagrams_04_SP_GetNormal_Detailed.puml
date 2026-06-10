@@ -1,0 +1,173 @@
+@startuml DailyNormalClassificationBySport_SP_GetNormal_Detailed
+!theme plain
+title Daily Normal Classification By Sport - SP GetNormal Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_DailyScan_GetNormal;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Parameters: @op_LastCategoryID (OUTPUT), @op_LastCustID (OUTPUT)
+end note
+
+:Get Constants;
+note right
+    CONST_PARENTID_NORMAL
+    CONST_CATEGROUPID_PROBATION
+    CONST_PARENTID_WRAPPER
+end note
+
+:Create Temp Tables;
+note right
+    Temp_Category:
+    - CategoryID, ScanDate
+    - PRIMARY KEY (CategoryID)
+    
+    Temp_Normal:
+    - CustID, SportID
+    - PRIMARY KEY (CustID, SportID)
+end note
+
+:Get Normal Categories;
+note right
+    SELECT CategoryID
+    , DATE_SUB(NOW(), INTERVAL ScanIntervalInSecond - 86400 SECOND) AS ScanDate
+    FROM CustomerCategory
+    WHERE ParentID = CONST_PARENTID_NORMAL
+      AND CategoryGroupID <> CONST_CATEGROUPID_PROBATION
+      AND IsActive = 1
+      AND ScanIntervalInSecond > 0
+    INSERT INTO Temp_Category
+end note
+
+:Get System Parameters;
+note right
+    SELECT ParameterValue FROM SystemParameter
+    WHERE ParameterID = 113 (BatchSize)
+    WHERE ParameterID = 114 (LastCategoryID)
+    WHERE ParameterID = 115 (LastCustID)
+end note
+
+:Initialize LastCategoryID;
+note right
+    IF LastCategoryID IS NULL OR = 0 THEN
+        SELECT MIN(CategoryID) FROM Temp_Category
+    END IF
+end note
+
+:Get ScanDateValid;
+note right
+    SELECT ScanDate FROM Temp_Category
+    WHERE CategoryID = LastCategoryID
+end note
+
+:Get Customers from Current Category;
+note right
+    SELECT tmplc.CustID, tmplc.SportID
+    FROM CTSCustomerClassification_BySport AS clss
+    LATERAL JOIN (
+        SELECT cc.CustID, cc.SportID, cc.CategoryID
+        FROM CTSCustomerClassification_BySport AS cc
+        INNER JOIN CustomerCategory AS ca ON ca.CategoryID = cc.CategoryID
+        WHERE cc.CustID = clss.CustID
+          AND cc.SportID = clss.SportID
+          AND ca.IsActive = 1
+          AND ca.ParentID <> CONST_PARENTID_WRAPPER
+        ORDER BY ca.CategoryPriority ASC, cc.LastModifiedDate DESC
+        LIMIT 1
+    ) AS tmplc
+    WHERE clss.CustID > LastCustID
+      AND clss.CategoryID = LastCategoryID
+      AND clss.LastScannedDate <= ScanDateValid
+      AND tmplc.CategoryID = LastCategoryID
+      AND EXISTS (
+          SELECT 1 FROM CTSCustomerAssociationStatus
+          WHERE CustID = clss.CustID
+            AND LastTicketDate >= From30Date
+      )
+    ORDER BY clss.CategoryID ASC, clss.CustID ASC
+    LIMIT BatchSize
+    INSERT INTO Temp_Normal
+end note
+
+if (Has Customers in Temp_Normal?) then (no)
+    :Get Next Category;
+    note right
+        SELECT cate.CategoryID, cate.ScanDate
+        FROM Temp_Category AS cate
+        INNER JOIN CTSCustomerClassification_BySport AS clss
+          ON clss.CategoryID = cate.CategoryID
+        LATERAL JOIN (
+            SELECT cc.CategoryID, cc.LastScannedDate
+            FROM CTSCustomerClassification_BySport AS cc
+            INNER JOIN CustomerCategory AS ca ON ca.CategoryID = cc.CategoryID
+            WHERE cc.CustID = clss.CustID
+              AND cc.SportID = clss.SportID
+              AND ca.IsActive = 1
+              AND ca.ParentID <> CONST_PARENTID_WRAPPER
+            ORDER BY ca.CategoryPriority ASC, cc.LastModifiedDate DESC
+            LIMIT 1
+        ) AS tmplc
+        WHERE cate.CategoryID > LastCategoryID
+          AND tmplc.CategoryID = cate.CategoryID
+          AND tmplc.LastScannedDate <= cate.ScanDate
+          AND EXISTS (
+              SELECT 1 FROM CTSCustomerAssociationStatus
+              WHERE CustID = clss.CustID
+                AND LastTicketDate >= From30Date
+          )
+        ORDER BY cate.CategoryID ASC
+        LIMIT 1
+    end note
+    
+    if (NextCategoryID Found?) then (yes)
+        :Get Customers from Next Category;
+        note right
+            SELECT tmplc.CustID, tmplc.SportID
+            FROM CTSCustomerClassification_BySport AS clss
+            LATERAL JOIN (...)
+            WHERE clss.CustID > 0
+              AND clss.CategoryID = NextCategoryID
+              AND clss.LastScannedDate <= NextScanDateValid
+              AND tmplc.CategoryID = NextCategoryID
+              AND EXISTS (...)
+            ORDER BY clss.CategoryID ASC, clss.CustID ASC
+            LIMIT BatchSize
+            INSERT INTO Temp_Normal
+        end note
+    else (no)
+        :Set NextCategoryID = LastCategoryID;
+    endif
+endif
+
+:Get Max CustID;
+note right
+    SELECT MAX(CustID) FROM Temp_Normal
+    INTO NextCustID
+end note
+
+if (NextCustID IS NOT NULL?) then (yes)
+    :Set Output Parameters;
+    note right
+        @op_LastCategoryID = NextCategoryID
+        @op_LastCustID = NextCustID
+    end note
+else (no)
+    :Reset to First Category;
+    note right
+        SELECT MIN(CategoryID) FROM Temp_Category
+        INTO NextCategoryID
+        @op_LastCategoryID = NextCategoryID
+        @op_LastCustID = 0
+    end note
+endif
+
+:Return Results;
+note right
+    SELECT CustID AS CustId, SportID AS SportGroup
+    FROM Temp_Normal
+end note
+
+stop
+
+@enduml
+

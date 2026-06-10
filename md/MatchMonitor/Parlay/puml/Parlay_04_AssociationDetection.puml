@@ -1,0 +1,139 @@
+@startuml Parlay_AssociationDetection
+!theme plain
+title Parlay Group Betting - Association Detection Logic (4 Criteria)
+
+start
+
+:Match group from staging table\n(MatchID, ScoreDiff, BettypeID, BetID, Betteam);
+
+:Extract:\n- CustIDList (MainDB CustIDs)\n- CTSCustIDList (CTS internal IDs)\n- TransIDmList (detail transaction IDs);
+
+note right
+    **Example:**
+    CustIDList: "5001,5002,5003,5004,5005"
+    CTSCustIDList: "1001,1002,1003,1004,1005"
+    TransIDmList: "10001,10002,10003,10004,10005"
+end note
+
+partition "**Round 1: Association Detection**" {
+    :Call Association Detection Service;
+    
+    :Prepare detection parameters;
+    
+    note right
+        **4 Detection Criteria (Always On):**
+        
+        1. **IsDevice = true**
+           - Same device fingerprint
+        
+        2. **IsAI = true**
+           - AI-detected similarity
+        
+        3. **IsIP = true**
+           - Same IP address
+        
+        4. **Is3MatchesLast7Days = true**
+           - Bet on same 3 matches in last 7 days
+        
+        **NOT USED:**
+        5. ~~IsIPLast3Days~~ (disabled)
+    end note
+    
+    :Run association detection:\nAssociationDetection.DetectAssociationLv1(param);
+    
+    :Get association result:\n[{CustID: 5001, GroupID: 1},\n {CustID: 5002, GroupID: 1},\n {CustID: 5003, GroupID: 2},\n {CustID: 5004, GroupID: 0},  -- Unassigned\n {CustID: 5005, GroupID: 0}]; -- Unassigned
+    
+    note right
+        **GroupID Assignment:**
+        - GroupID > 0: Detected association
+        - GroupID = 0: No association found
+    end note
+    
+    :Call Process SP with CustGroup JSON;
+    
+    partition "**Inside Process SP**" {
+        :Parse CustGroup JSON into Temp_CustGroup table;
+        
+        :Load tickets from staging\nJOIN with Temp_CustGroup ON CustID;
+        
+        :Group tickets by:\n- GroupID (from association)\n- TimeStep windows (180 seconds);
+        
+        :For each time window:;
+        
+        if (COUNT(DISTINCT CustID) > 1?) then (yes)
+            :Mark as valid group;
+            
+            :Output complete group:\n- GroupID\n- TransIDmList\n- CustIDList\n- RefnoList;
+        else (no)
+            :Skip group\n(only 1 customer);
+        endif
+    }
+    
+    :Get Round 1 results:\n- Complete groups (ready to save)\n- Reprocess groups (has GroupID = 0);
+}
+
+if (Has reprocess groups with GroupID = 0?) then (yes)
+    partition "**Round 2: Reprocess Unassigned**" {
+        :Extract unassigned customers:\nCustIDList where GroupID = 0;
+        
+        note right
+            **Example:**
+            Reprocess CustIDList: "5004,5005"
+        end note
+        
+        :Run association detection again:\nAssociationDetection.DetectAssociationLv1(\nreprocessParam);
+        
+        :Get new association result:\n[{CustID: 5004, GroupID: 3},\n {CustID: 5005, GroupID: 3}];
+        
+        :Call Process SP again with new CustGroup;
+        
+        :Get Round 2 results:\n- Additional complete groups\n- Remaining reprocess groups (if any);
+        
+        note right
+            **Round 2 Purpose:**
+            Some customers may not be detected
+            in Round 1 due to timing or partial data.
+            Round 2 gives them another chance.
+        end note
+    }
+else (no)
+    :All customers assigned;
+endif
+
+partition "**Merge Results**" {
+    :Combine Round 1 and Round 2 results;
+    
+    :Group by TransIDList to avoid duplicates;
+    
+    :Assign final GroupID (sequential: 1, 2, 3, ...);
+    
+    :Output final detection result:\n[{GroupID: 1, TransIDList: "...", CustIDList: "...", RefnoList: "..."},\n {GroupID: 2, TransIDList: "...", CustIDList: "...", RefnoList: "..."},\n ...];
+}
+
+:Save to database\n(Complete & Save phase);
+
+stop
+
+floating note right
+    **Key Differences from Standard Group Betting:**
+    
+    1. **4 Criteria instead of 5**
+       - No "IP Last 3 Days" check
+       - Always use same 4 criteria
+    
+    2. **No Sport-Specific Configuration**
+       - Parlay has single rule for all sports
+       - No MatchDetectAssociationSetting table
+    
+    3. **Parlay-Specific Data**
+       - Refno: Combo ticket ID
+       - TransIDm: Detail transaction ID
+       - Multiple matches per ticket
+    
+    4. **Same 2-Round Logic**
+       - Round 1: Detect all customers
+       - Round 2: Reprocess unassigned (GroupID = 0)
+end note
+
+@enduml
+

@@ -1,0 +1,78 @@
+@startuml DangerMonitor_DatabaseFlow
+!theme plain
+title Danger Monitor - Database Flow Diagram
+
+start
+:User Request;
+
+if (Action Type?) then (GetDangerMonitor - No Association)
+    :Create DangerMonitorSearchMatchInfoCriteria;
+    note right
+        Parameters:
+        - @FromDate
+        - @ToDate
+        - @SportList
+        - @BettypeList
+        - @DangerLevels
+        - @UserNameList
+        - @LeagueGroupList
+        - @UserAmount
+        - @TotalAmount
+    end note
+    :Execute CTS_MatchTicketInfo_Get;
+    :Process Results;
+    :Return DangerMMTicketInfoEntity[];
+    
+elseif (GetDangerMonitor - With Association) then
+    :Detect Association First;
+    :Create DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria;
+    note right
+        Parameters:
+        - @FromDate
+        - @ToDate
+        - @SportList
+        - @BettypeList
+        - @AssociationsList (JSON)
+        - Other filters
+    end note
+    :Execute CTS_MatchTicketInfo_Associations_Get;
+    :Process Results;
+    :Return DangerMMTicketInfoEntity[];
+    
+elseif (GetMatchMonitorFilter) then
+    :Create Filter Criteria;
+    note right
+        Parameters:
+        - @MatchID
+        - @BettypeID
+        - @BetID
+        - @ViewMode = 2 (Danger Monitor)
+    end note
+    :Execute CTS_MatchMonitor_Details_GetFilter;
+    :Process Filter Options;
+    :Return MMDetailFilterViewModel;
+    
+elseif (GetMatchMonitorDetail) then
+    :Create Detail Criteria;
+    note right
+        Parameters:
+        - @MatchID
+        - @BettypeID
+        - @BetID
+        - @QueryType = 3 (Danger Monitor)
+        - Filter parameters
+    end note
+    :Execute CTS_MatchMonitor_Details_GetTicket;
+    :Process Ticket Details;
+    :Return MMDetailTicketListViewModel;
+    
+else (Other Actions)
+    :Handle Other Requests;
+endif
+
+:Map to ViewModels;
+:Return to Service Layer;
+stop
+
+@enduml
+

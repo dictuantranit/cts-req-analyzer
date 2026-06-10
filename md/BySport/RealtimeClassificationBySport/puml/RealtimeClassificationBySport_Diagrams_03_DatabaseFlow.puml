@@ -1,0 +1,107 @@
+@startuml RealtimeClassificationBySport_DatabaseFlow
+!theme plain
+title Realtime Classification By Sport - Database Flow Diagram
+
+start
+:Job Request Received;
+
+if (Action Type?) then (GetNewPlaceBetCustomers)
+    :Create GetChangeCustomerRealtimeBySportCriteria;
+    note right
+        Parameters:
+        - @ScannedMaxId (OUTPUT)
+    end note
+    :Execute CTS_BySportNormalClassification_RealTime_GetChanges [VR2 DB];
+    :Process Results;
+    note right
+        Logic:
+        - Get TOP 20000 from RealtimeChanges
+        - Order by ID ASC
+        - Return: CustID, SportGroup
+        - Output: ScannedMaxId (MAX ID)
+        Returns:
+        - CustomerNewPlaceBets (CustID, SportGroup)
+        - ScannedMaxId
+    end note
+    :Return GetNewPlaceBetCustomerModel;
+    
+elseif (GetCustomerCategory) then
+    :Create GetCustomerCategoryRealtimeBySportCriteria;
+    note right
+        Parameters:
+        - @ip_CustInfoList (JSON)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_Realtime_GetCategory;
+    :Process Category Classification;
+    note right
+        Logic:
+        - Parse JSON customer list
+        - Get current classification from CTSCustomerClassification_BySport
+        - Categorize customers:
+          * NULL or Normal: CustomerNormals
+          * PA or PotentialPA: CustomerPADailyScans
+        Returns:
+        - ResultSet 1: CustomerNormals (CustID, SportGroup)
+        - ResultSet 2: CustomerPADailyScans (CustID, SportGroup)
+    end note
+    :Return GetCustomerCategoryBySportModel;
+    
+elseif (PreprocessCustomerClassRealtime) then
+    :Create PreprocessCustomerRealtimeBySportCriteria;
+    note right
+        Parameters:
+        - @CustomersXML (XML)
+    end note
+    :Execute CTS_BySportNormalClassification_RealTime_Preprocess [VR2 DB];
+    note right
+        Logic:
+        - Parse XML customer list
+        - Get Priority from CustomerClassification_BySport_Priority
+        - Call CTS_BySportNormalClassification_NormalPool_Insert
+        - Insert customers into Normal Pool for classification
+    end note
+    :Process Preprocess Results;
+    :Return Success;
+    
+elseif (InsertPADailyScanQueue) then
+    :Create InsertQueuePADailyBySportCriteria;
+    note right
+        Parameters:
+        - @ip_CustInfoList (JSON)
+    end note
+    :Execute CTS_DC_CustClassification_BySport_DailyScanPA_InsertToQueue;
+    note right
+        Logic:
+        - Parse JSON customer list
+        - Insert into CTSCustomerClassification_BySport_DailyPAQueue
+        - Set CreatedTime = NOW()
+    end note
+    :Process Queue Insertion;
+    :Return Success;
+    
+elseif (CompleteCustomerRealtime) then
+    :Create CompleteCustomerRealtimeBySportCriteria;
+    note right
+        Parameters:
+        - @ScannedMaxId
+    end note
+    :Execute CTS_BySportNormalClassification_RealTime_Complete [VR2 DB];
+    :Delete Processed Records;
+    note right
+        Logic:
+        - DELETE FROM CustomerClassification_BySport_RealtimeChanges
+        - WHERE ID <= @ScannedMaxId
+        - Mark processed records as completed
+    end note
+    :Return Success;
+    
+else (Other Actions)
+    :Handle Other Requests;
+endif
+
+:Map to Entities/Models;
+:Return to Service Layer;
+stop
+
+@enduml
+

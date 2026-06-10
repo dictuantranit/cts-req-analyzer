@@ -1,0 +1,219 @@
+@startuml AIRobotDetection_MainFlow
+title AI Robot Detection - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam titleFontSize 16
+skinparam titleFontStyle bold
+
+|JobService|
+start
+:POST /api/classificationJobs/robotAIDetection;
+note right
+  Parameters:
+  - batchExternalSize: Batch size for external push
+  - batchInternalSize: Batch size for PA insertion
+  
+  Ex: batchExternalSize = 1000, batchInternalSize = 5000
+end note
+
+:ScanningAIRobotClassification(batchExternalSize, batchInternalSize);
+:Validate batch sizes > 0;
+
+if (Valid?) then (yes)
+  :InsertAIRobotClassification();
+else (no)
+  :Log Error - Invalid Batch Size;
+  stop
+endif
+
+|Service Layer|
+:Start();
+note right
+  Initialize robotDetections list
+end note
+
+:GetRobotDetections(RobotDetection_LastID);
+note right
+  **Get AI-Detected Robots**:
+  
+  1. Read System Parameter:
+     - Key: RobotDetection_LastID
+     - Get last processed RobotDetectionID
+  
+  2. Query RobotDetection Table:
+     - FROM RobotDetection
+     - WHERE RobotDetectionID > @LastID
+     - ORDER BY RobotDetectionID
+     - LIMIT (batch size)
+  
+  **Source**: AI/ML Robot Detection System ⭐
+  
+  **Returns**: RobotAIEntity[]
+  - RobotDetectionID (for pagination)
+  - CustID
+  - CategoryID (Robot category)
+  - LastModifiedDate
+  
+  **AI Detection Criteria**:
+  - Automated betting patterns
+  - High-frequency betting
+  - Consistent time intervals
+  - Machine-like behavior
+  - API-based betting
+  - ML model prediction
+end note
+
+if (Has robot detections?) then (yes)
+  :Chunk by batchInternalSize;
+  note right
+    Split into batches for processing
+    Batch size: batchInternalSize
+  end note
+
+  repeat
+    :Process robot chunk;
+    
+    :Transform to InsertProblemAccountEntity;
+    note right
+      **RobotAIEntity → InsertProblemAccountEntity**:
+      
+      For each AI robot:
+      new InsertProblemAccountEntity(robotAIEntity)
+      {
+        CustID: robot.CustID,
+        CategoryID: robot.CategoryID,
+        CategoryGroupID: Robot Group,
+        // ... robot-specific fields
+      }
+      
+      **Robot Classification**:
+      - Category: Robot
+      - Automated detection
+      - AI/ML verified
+    end note
+
+    :InsertProblemAccountPackage();
+    note right
+      **Insert Robot PA Classification**:
+      - FunctionId: RobotUserJob
+      - CCInputFlow: InsertPACategory
+      - Insert into CTSCustomerClassification
+      - Apply Robot PA rules
+      - Returns: Inserted CustIDs
+      
+      **Inherited Method** from ProblemAccountServices
+    end note
+
+    :PushExternalPackageByCustId();
+    note right
+      **Push to MainDB** (External):
+      - Input: Inserted CustIDs
+      - Parameters: pushConfig
+        * RoleGroup: Member
+        * IsUpdateDangerToMainDB: true
+        * IsSyncAFCData: false (no AFC sync for robots)
+      - Makes robot classification visible
+      - Batch push for efficiency
+    end note
+
+    if (Push failed?) then (yes)
+      :Return false;
+      stop
+    endif
+
+    :Thread.Sleep(RobotUsers_SleepTimes);
+    note right
+      **Throttling** ⭐:
+      - Sleep between chunks
+      - Prevents database overload
+      - Prevents API overload
+      - Smooth processing
+      
+      RobotUsers_SleepTimes: Configurable (e.g., 100ms)
+    end note
+
+  repeat while (More chunks?) is (yes)
+  -> no;
+
+  |System Parameters|
+  :UpdateLastScannedId(RobotDetection_LastID);
+  note right
+    **Update System Parameter**:
+    - Key: RobotDetection_LastID
+    - Value: MAX(RobotDetectionID) from processed robots
+    
+    **Enables**:
+    - Next run starts from last processed ID
+    - Incremental pagination
+    - No re-processing
+    - Resumable processing
+  end note
+
+else (no)
+  note right
+    **No AI robot detections**:
+    All robots processed
+    or no new robots detected
+  end note
+endif
+
+|JobService|
+:Complete;
+note right
+  **Job Completion**:
+  All AI-detected robots processed
+  System parameter updated to latest ID
+  Ready for next job run
+end note
+
+note right
+  **Key Characteristics**:
+  
+  1. **AI/ML Detection Source** ⭐:
+     - Automated robot detection
+     - ML model predictions
+     - Pattern-based detection
+     - Continuous monitoring
+  
+  2. **ID-Based Pagination**:
+     - Uses RobotDetectionID
+     - Incremental processing
+     - WHERE RobotDetectionID > @LastID
+     - System parameter persisted
+  
+  3. **Simple Flow** (no loop):
+     - Get robots (one-time)
+     - Process all in batches
+     - Update parameter
+     - Complete
+  
+  4. **Batch Processing with Throttling**:
+     - Chunk by internalSize
+     - Sleep between chunks ⭐
+     - Prevents overload
+     - Smooth processing
+  
+  5. **External Push**:
+     - Push to MainDB after each chunk
+     - Makes robot classification visible
+     - No AFC sync for robots
+  
+  6. **Inheritance**:
+     - Extends ProblemAccountServices
+     - Reuses InsertProblemAccountPackage method
+     - Consistent robot PA insertion
+  
+  **AI Robot Detection**:
+  - Source: AI/ML Detection System
+  - Automated pattern recognition
+  - High accuracy robot identification
+  - Machine learning based
+end note
+
+stop
+
+@enduml
+

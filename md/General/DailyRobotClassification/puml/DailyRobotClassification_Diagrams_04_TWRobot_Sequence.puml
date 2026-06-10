@@ -1,0 +1,318 @@
+@startuml TWRobotAccount_Sequence
+title TW Robot Account - Sequence Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequence {
+  ArrowColor Black
+  ActorBorderColor Black
+  LifeLineBorderColor Black
+  LifeLineBackgroundColor White
+  
+  ParticipantBorderColor Black
+  ParticipantBackgroundColor White
+  ParticipantFontSize 12
+  
+  BoxBorderColor Black
+  BoxBackgroundColor #F0F0F0
+}
+
+actor Scheduler as scheduler
+participant "ClassificationJob\nController" as controller
+participant "RobotAccountInsert\nJobService" as jobService
+participant "RobotTWInsert\nServices" as service
+participant "RobotTWInsert\nDataAccess" as dataAccess
+participant "SystemParameter\nServices" as sysParamService
+participant "ProblemAccount\nServices" as paService
+participant "CustClassToMainDB\nService" as mainDBService
+participant "CCAgency\nService" as agencyService
+database "ON_USER\n(SQL Server)" as sqlserver
+database "CTS_DataCenter\n(MySQL)" as mysql
+database "TW System\n(Taiwan)" as twSystem
+
+scheduler -> controller : POST /robotTWClassification\n(batchExternalSize, batchInternalSize)
+activate controller
+
+controller -> jobService : ScanningTWRobotAccount(batchExternalSize, batchInternalSize)
+activate jobService
+
+jobService -> jobService : Validate batch sizes > 0
+jobService -> jobService : InsertTWRobot()
+
+== Step 1: Initialize ==
+jobService -> service : Start()
+activate service
+service -> service : Initialize TWRobotUserViewEntity\n(RobotUsers: [], MaxTimestamp: 0)
+service --> jobService : this
+deactivate service
+
+== Step 2: Get Last Timespan ==
+jobService -> service : GetLastTimespan()
+activate service
+
+service -> sysParamService : GetLastScannedId(RobotAccountLastScannedTime)
+activate sysParamService
+sysParamService -> mysql : SELECT Value FROM CTS_SystemParameter\nWHERE ParameterKey = 'RobotAccountLastScannedTime'
+activate mysql
+note right
+  Get last scanned timestamp
+  For time-based pagination
+end note
+mysql --> sysParamService : lastScannedTimespan (long)
+deactivate mysql
+sysParamService --> service : lastScannedTimespan
+deactivate sysParamService
+
+service --> jobService : this
+deactivate service
+
+== Step 3: Get TW Robot Users ==
+jobService -> service : GetTWRobotUser()
+activate service
+
+service -> dataAccess : GetTWRobotUsers(lastScannedTimespan)
+activate dataAccess
+
+dataAccess -> sqlserver : CTS_Customer_RobotListSel\n(timespan parameter)
+activate sqlserver
+note right
+  **TW System Query**:
+  - FROM TW Robot Detection tables
+  - WHERE Timestamp > @lastScannedTimespan
+  - TW rule-based detection
+  - Taiwan market robots
+  
+  **Timeout**: 900 seconds (15 min) ⭐
+end note
+
+sqlserver -> twSystem : (TW system data)
+note right
+  **TW Robot Detection**:
+  - Taiwan-specific rules
+  - Manual/automated detection
+  - Regional patterns
+  - Historical analysis
+end note
+
+sqlserver --> dataAccess : TWRobotUserViewEntity
+deactivate sqlserver
+note right
+  **Result**:
+  - RobotUsers[] (CustId, Counter)
+  - MaxTimestamp (pagination)
+end note
+
+dataAccess --> service : TWRobotUserViewEntity
+deactivate dataAccess
+
+service -> service : Store robotInfo
+service --> jobService : this
+deactivate service
+
+== Step 4: Get Customer Role ==
+alt If robotInfo.RobotUsers.Any()
+  jobService -> service : GetCustomerRole()
+  activate service
+  
+  service -> service : Join CustIDs to comma-separated string
+  
+  service -> dataAccess : GetCustomerRole(custIDs)
+  activate dataAccess
+  dataAccess -> mysql : Query Customer Roles
+  activate mysql
+  note right
+    **Get Customer Role**:
+    - RoleID: 1 = Member, Others = Agency
+    - Used for routing logic
+  end note
+  mysql --> dataAccess : CustomerRoleEntity[]
+  deactivate mysql
+  dataAccess --> service : CustomerRoleEntity[]
+  deactivate dataAccess
+  
+  service -> service : Build Dictionary (CustID → RoleID)
+  service -> service : Update RobotUsers with RoleID
+  service --> jobService : this
+  deactivate service
+
+  == Step 5: Get Robot Category ==
+  jobService -> service : GetRobotUserCategoryId(serviceName)
+  activate service
+  
+  service -> service : GetCategoryByCategoryTypeName("ROBOTUSER")
+  note right
+    **Get Robot Category**:
+    - Query CategoryMaster
+    - CategoryTypeName = "ROBOTUSER"
+    - Returns CategoryID
+  end note
+  
+  alt If robotCategoryId is null
+    service -> service : Log Error - Invalid Robot CategoryID
+  end
+  
+  service --> jobService : this
+  deactivate service
+
+  == Step 6: Insert TW Robot Package ==
+  jobService -> service : InsertTWRobotPackage(internalSize, agencyApiUrl, pushConfig)
+  activate service
+  
+  service -> service : Filter: RoleID != 1 (Agency Robots)
+  
+  === Agency Robot Processing ===
+  alt If agencyRobots.Any()
+    service -> service : Log input data
+    service -> service : Build InsertTWAgencyRobotModel
+    
+    service -> agencyService : CallAPIPost(robot, internalSize, externalBatchSize, FromFlow, apiUrl)
+    activate agencyService
+    note right
+      **Agency API Call**:
+      - POST to Agency endpoint
+      - /InsertTWRobotAgency
+      - Agency-specific handling
+      - External routing
+    end note
+    
+    agencyService -> agencyService : Call external Agency API
+    agencyService --> service : response (Task<bool>)
+    deactivate agencyService
+    
+    alt If Agency API failed
+      service --> jobService : false
+      jobService -> controller : false
+      controller -> scheduler : false
+      note right
+        **Stop Processing**:
+        Agency insert failed
+      end note
+    end
+  end
+  
+  service -> service : Filter: RoleID == 1 (Member Robots)
+  
+  === Member Robot Processing ===
+  alt If memberRobots.Any()
+    service -> service : Chunk by internalSize
+    
+    loop For each memberRobot chunk
+      
+      service -> service : Log input data
+      service -> service : Transform → InsertProblemAccountEntity
+      
+      service -> paService : InsertProblemAccountPackage(insertedPA, FunctionId, CCInputFlow, ...)
+      activate paService
+      note right
+        **Insert Robot PA**:
+        - FunctionId: RobotUserJob
+        - CCInputFlow: InsertPACategory
+        - Robot category
+      end note
+      
+      paService -> mysql : Insert Robot PA Classification
+      activate mysql
+      mysql --> paService : Inserted CustIDs
+      deactivate mysql
+      
+      paService --> service : CustIDs[]
+      deactivate paService
+      
+      alt If custIds.Any()
+        service -> mainDBService : PushExternalPackageByCustId(custIds, pushConfig)
+        activate mainDBService
+        note right
+          **Push to MainDB**:
+          - RoleGroup: Member
+          - IsUpdateDangerToMainDB: true
+          - IsSyncAFCData: false
+        end note
+        
+        mainDBService -> mainDBService : Push to external API
+        mainDBService --> service : isSuccess (bool)
+        deactivate mainDBService
+        
+        alt If push failed
+          service --> jobService : false
+          jobService -> controller : false
+          controller -> scheduler : false
+        end
+      end
+      
+      service -> service : Thread.Sleep(RobotUsers_SleepTimes)
+      note right
+        **Throttling** ⭐:
+        Sleep between chunks
+      end note
+      
+    end
+  end
+  
+  service --> jobService : true (success)
+  deactivate service
+  
+  == Step 7: Update Last Timespan ==
+  alt If robotInfo has data and robotCategoryId not null
+    jobService -> service : UpdateLastTimespan()
+    activate service
+    
+    service -> service : Get robotInfo.MaxTimestamp
+    
+    service -> sysParamService : UpdateTimingExecution(maxTimestamp.ToString(), RobotAccountLastScannedTime)
+    activate sysParamService
+    
+    sysParamService -> mysql : UPDATE CTS_SystemParameter\nSET Value = @maxTimestamp\nWHERE ParameterKey = 'RobotAccountLastScannedTime'
+    activate mysql
+    note right
+      **Update Pagination**:
+      Store last timestamp
+      for next job run
+    end note
+    mysql --> sysParamService : void
+    deactivate mysql
+    
+    sysParamService --> service : void
+    deactivate sysParamService
+    
+    service --> jobService : void
+    deactivate service
+  end
+end
+
+== Job Complete ==
+jobService --> controller : true (success)
+deactivate jobService
+controller --> scheduler : true
+deactivate controller
+
+note bottom
+  **Key Flow Points**:
+  
+  1. **TW System Integration**:
+     - Taiwan-based robot detection
+     - Long timeout (900s / 15 min)
+     - Rule-based detection system
+  
+  2. **Time-Based Pagination**:
+     - Uses Timestamp for incremental processing
+     - WHERE Timestamp > @lastScannedTimespan
+     - System parameter stores last timestamp
+  
+  3. **Dual-Path Processing**:
+     - **Agency Path**: Via Agency API (external)
+     - **Member Path**: Direct PA insert + Push MainDB
+     - Sequential: Agency first, then Member
+  
+  4. **5-Step Fluent Chain**:
+     Start → GetLastTimespan → GetTWRobotUser
+     → GetCustomerRole → GetRobotUserCategoryId
+     → InsertTWRobotPackage
+  
+  5. **Throttling**:
+     - Sleep between member chunks
+     - Prevents overload
+     - Smooth processing
+end note
+
+@enduml
+

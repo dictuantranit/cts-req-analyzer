@@ -1,0 +1,79 @@
+@startuml NormalAccountClassificationBySport_SP_GetNormalPool_Detailed
+!theme plain
+title Normal Account Classification By Sport - SP GetNormalPool Detailed Flow
+
+start
+:CTS_BySportNormalClassification_NormalPool_Get;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Parameter: @ScannedMaxId (OUTPUT)
+end note
+
+:Initialize Variables;
+note right
+    @BATCHSIZE = 20000
+    @BYSPORT_LASTSCANNEDROW = 2
+    @LastScannedRow (ROWVERSION)
+end note
+
+:Create Temp Table;
+note right
+    #tmpCustomers:
+    - Id (BIGINT PRIMARY KEY IDENTITY)
+    - CustId (INT)
+    - SportGroup (SMALLINT)
+    - IsCheckBetCount (BIT)
+end note
+
+:Get Scanned MaxID;
+note right
+    SELECT MAX(c.ID)
+    FROM CustomerClassification_BySport_NormalPool AS c
+    @ScannedMaxId
+end note
+
+:Get LastScannedRow;
+note right
+    SELECT CAST(CAST([Value] AS BIGINT) AS ROWVERSION)
+    FROM CustomerClassification_Parameter
+    WHERE [DataId] = @BYSPORT_LASTSCANNEDROW
+    @LastScannedRow
+end note
+
+if (ScannedMaxId IS NOT NULL?) then (yes)
+    :Get Top Customers by Priority;
+    note right
+        INSERT INTO #tmpCustomers
+        SELECT TOP(@BATCHSIZE)
+          np.CustId, np.SportGroup
+          , CASE WHEN (COUNT(np.CustId) = COUNT(np.FunctionId))
+                 AND (COUNT(np.FunctionId) = SUM(np.FunctionId))
+            THEN 1 ELSE 0 END AS IsCheckBetCount
+        FROM CustomerClassification_BySport_NormalPool AS np
+        WHERE np.ID <= @ScannedMaxId
+          AND NOT EXISTS (
+              SELECT 1 FROM CustomerClassification_BySport AS cc
+              WHERE cc.CustId = np.CustId
+                AND cc.SportId = np.SportGroup
+                AND cc.[RowVersion] > @LastScannedRow
+          )
+        GROUP BY np.CustId, np.SportGroup
+        ORDER BY Min(np.Priority) ASC, Min(np.ID) ASC
+    end note
+else (no)
+    :No customers to process;
+endif
+
+:Return Results;
+note right
+    SELECT CustId AS CustId
+         , SportGroup AS SportGroup
+         , IsCheckBetCount AS IsCheckBetCount
+    FROM #tmpCustomers
+    ORDER BY CustId
+end note
+
+stop
+
+@enduml
+

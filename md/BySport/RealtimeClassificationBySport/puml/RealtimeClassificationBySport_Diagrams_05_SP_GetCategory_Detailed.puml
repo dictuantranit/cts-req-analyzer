@@ -1,0 +1,87 @@
+@startuml RealtimeClassificationBySport_SP_GetCategory_Detailed
+!theme plain
+title Realtime Classification By Sport - SP GetCategory Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_Realtime_GetCategory;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Tables: CTSCustomerClassification_BySport, CustomerCategory
+    Parameter: @ip_CustInfoList (JSON)
+end note
+
+:Get Constants;
+note right
+    CONST_PARENTID_NORMAL
+    CONST_PARENTID_PA
+    CONST_PARENTID_POTENTIALPA
+    CONST_PARENTID_WRAPPER
+end note
+
+:Create Temp Tables;
+note right
+    Temp_Customers:
+    - CustID, SportGroup
+    - PRIMARY KEY (CustID, SportGroup)
+    
+    Temp_CustomerCategory:
+    - CustID, CTSCustID
+    - ParentID, CategoryID
+    - RelevantCategoryID, SportGroup
+    - INDEX IX_Temp_CustomerCategory_CustID
+end note
+
+:Parse JSON Customer List;
+note right
+    INSERT INTO Temp_Customers
+    SELECT DISTINCT CustID, SportGroup
+    FROM JSON_TABLE(@ip_CustInfoList)
+end note
+
+:Get Current Customer Category;
+note right
+    LATERAL JOIN
+    SELECT cc.CustID, cc.CTSCustID, cc.CategoryID
+      , ca.ParentID, ca.RelevantCategoryID
+    FROM CTSCustomerClassification_BySport AS cc
+    INNER JOIN CustomerCategory AS ca
+      ON ca.CategoryID = cc.CategoryID
+    WHERE temp.CustID = cc.CustID
+      AND temp.SportGroup = cc.SportID
+      AND ca.IsActive = 1
+      AND ca.ParentID <> CONST_PARENTID_WRAPPER
+    ORDER BY ca.CategoryPriority ASC
+      , cc.LastModifiedDate DESC
+    LIMIT 1
+    INSERT INTO Temp_CustomerCategory
+end note
+
+:Return CustomerNormals (ResultSet 1);
+note right
+    SELECT DISTINCT
+    temp.CustID, temp.SportGroup
+    FROM Temp_Customers AS temp
+    LEFT JOIN Temp_CustomerCategory AS cate
+      ON cate.CustID = temp.CustID
+      AND cate.SportGroup = temp.SportGroup
+    WHERE cate.CategoryID IS NULL
+      OR (cate.CategoryID IS NOT NULL
+          AND cate.ParentID = CONST_PARENTID_NORMAL)
+    ResultSet 1: CustomerNormals
+end note
+
+:Return CustomerPADailyScans (ResultSet 2);
+note right
+    SELECT DISTINCT
+    CustID, SportGroup
+    FROM Temp_CustomerCategory
+    WHERE ParentID IN (CONST_PARENTID_PA
+                      , CONST_PARENTID_POTENTIALPA)
+      AND RelevantCategoryID IS NOT NULL
+    ResultSet 2: CustomerPADailyScans
+end note
+
+stop
+
+@enduml
+

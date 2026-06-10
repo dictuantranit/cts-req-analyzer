@@ -1,0 +1,296 @@
+@startuml DailyRobotClassification_DatabaseFlow
+title Daily Robot Classification - Database Flow (AI + TW)
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam databaseBackgroundColor #E8F5E9
+skinparam databaseBorderColor #4CAF50
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+
+|JobService|
+start
+
+split
+  
+  note right: **AI Robot Detection Flow**
+  |AI Robot Service|
+  :Start();
+  
+  :GetRobotDetections(RobotDetection_LastID);
+  
+  |CTS_DataCenter (MySQL)|
+  :Read System Parameter: RobotDetection_LastID;
+  
+  :Execute SP: **CTS_DC_RobotDetection_GetLatest**;
+  note right
+    **Database**: CTS_DataCenter.ctsService
+    **Timeout**: 300 seconds (default)
+    
+    **Purpose**: Get AI-detected robot customers
+    **Input**: @ip_RobotDetectionLastID (long)
+    
+    **Query Logic**:
+    ```sql
+    SELECT 
+      RobotDetectionID,
+      CustID,
+      CategoryID,
+      LastModifiedDate
+    FROM RobotDetection
+    WHERE RobotDetectionID > @ip_RobotDetectionLastID
+    ORDER BY RobotDetectionID
+    LIMIT (batch size)
+    ```
+    
+    **Data Source**: AI/ML Robot Detection System ⭐
+    - Automated pattern detection
+    - ML model predictions
+    - Continuous monitoring
+    
+    **Returns**: RobotAIEntity[]
+  end note
+  
+  :Return RobotAIEntity[];
+  
+  |AI Robot Service|
+  if (Has robots?) then (yes)
+    :Chunk by internalSize;
+    
+    repeat
+      :Transform to InsertProblemAccountEntity;
+      
+      :InsertProblemAccountPackage();
+      |CTS_DataCenter (MySQL)|
+      :INSERT INTO CTSCustomerClassification;
+      note right
+        **Insert Robot PA**:
+        - CustID, CategoryID (Robot)
+        - FunctionId: RobotUserJob
+        - CCInputFlow: InsertPACategory
+        - Robot-specific fields
+      end note
+      
+      :Return Inserted CustIDs;
+      
+      |AI Robot Service|
+      :PushExternalPackageByCustId();
+      |External - MainDB|
+      :Push to MainDB API;
+      note right
+        **External Push**:
+        - RoleGroup: Member
+        - IsUpdateDangerToMainDB: true
+        - IsSyncAFCData: false (no AFC for robots)
+      end note
+      
+      |AI Robot Service|
+      :Thread.Sleep(throttle);
+      
+    repeat while (More chunks?) is (yes)
+    -> no;
+    
+    |CTS_DataCenter (MySQL)|
+    :Update System Parameter: RobotDetection_LastID;
+    note right
+      ```sql
+      UPDATE CTS_SystemParameter
+      SET Value = MAX(RobotDetectionID)
+      WHERE ParameterKey = 'RobotDetection_LastID'
+      ```
+    end note
+  endif
+
+split again
+
+  note right: **TW Robot Flow**
+  |TW Robot Service|
+  :Start();
+  
+  :GetLastTimespan();
+  |CTS_DataCenter (MySQL)|
+  :Read System Parameter: RobotAccountLastScannedTime;
+  
+  |TW Robot Service|
+  :GetTWRobotUser();
+  
+  |ON_USER (SQL Server)|
+  :Execute SP: **CTS_Customer_RobotListSel**;
+  note right
+    **Database**: ON_USER.wsv_cts
+    **Timeout**: **900 seconds (15 minutes)** ⭐
+    
+    **Purpose**: Get TW-detected robot customers
+    **Input**: Timespan (last scanned timestamp)
+    
+    **Query Logic**:
+    ```sql
+    -- Complex TW system query
+    SELECT 
+      CustId,
+      Counter,
+      Timestamp
+    FROM TW_RobotDetection_Tables
+    WHERE Timestamp > @lastScannedTimespan
+    ORDER BY Timestamp
+    ```
+    
+    **Data Source**: TW (Taiwan) System ⭐
+    - Taiwan-specific rules
+    - Manual/automated detection
+    - Regional patterns
+    
+    **Returns**: TWRobotUserViewEntity
+    - RobotUsers[] (CustId, Counter)
+    - MaxTimestamp (pagination)
+  end note
+  
+  :Return TWRobotUserViewEntity;
+  
+  |TW Robot Service|
+  if (Has robots?) then (yes)
+    :GetCustomerRole();
+    |CTS_DataCenter (MySQL)|
+    :Query Customer Roles;
+    note right
+      ```sql
+      SELECT CustID, RoleID
+      FROM CustomerMaster
+      WHERE CustID IN (robot CustIDs)
+      ```
+      
+      **RoleID**:
+      - 1 = Member
+      - Others = Agency
+    end note
+    
+    |TW Robot Service|
+    :GetRobotUserCategoryId();
+    |CTS_DataCenter (MySQL)|
+    :Query Robot CategoryID;
+    note right
+      ```sql
+      SELECT CategoryID
+      FROM CategoryMaster
+      WHERE CategoryTypeName = 'ROBOTUSER'
+      ```
+    end note
+    
+    |TW Robot Service|
+    :InsertTWRobotPackage();
+    
+    partition "Agency Robots (RoleID != 1)" {
+      note right: **Agency Robot Path**
+      :Filter Agency Robots;
+      
+      :Call Agency API;
+      |External - Agency API|
+      :POST /InsertTWRobotAgency;
+      note right
+        **Agency-Specific Handling**:
+        - External routing
+        - Agency API endpoint
+        - Special agency rules
+        - Batch processing
+      end note
+      
+      |TW Robot Service|
+      if (API failed?) then (yes)
+        :Stop processing;
+        stop
+      endif
+    }
+    
+    partition "Member Robots (RoleID == 1)" {
+      note right: **Member Robot Path**
+      :Filter Member Robots;
+      :Chunk by internalSize;
+      
+      repeat
+        :Transform to InsertProblemAccountEntity;
+        
+        :InsertProblemAccountPackage();
+        |CTS_DataCenter (MySQL)|
+        :INSERT INTO CTSCustomerClassification;
+        note right
+          **Insert Robot PA**:
+          - CustID, CategoryID (Robot)
+          - RoleID: 1 (Member)
+          - Robot category
+        end note
+        
+        :Return Inserted CustIDs;
+        
+        |TW Robot Service|
+        :PushExternalPackageByCustId();
+        |External - MainDB|
+        :Push to MainDB API;
+        
+        |TW Robot Service|
+        :Thread.Sleep(throttle);
+        
+      repeat while (More chunks?) is (yes)
+      -> no;
+    }
+    
+    |CTS_DataCenter (MySQL)|
+    :Update System Parameter: RobotAccountLastScannedTime;
+    note right
+      ```sql
+      UPDATE CTS_SystemParameter
+      SET Value = MaxTimestamp
+      WHERE ParameterKey = 'RobotAccountLastScannedTime'
+      ```
+    end note
+  endif
+
+end split
+
+note right
+  **Database Architecture**:
+  
+  **AI Robot Detection**:
+  - **CTS_DataCenter** (MySQL): RobotDetection table + SystemParameter
+  - **AI/ML System**: Populates RobotDetection with ML predictions
+  - **Pagination**: RobotDetectionID (incremental ID)
+  
+  **TW Robot**:
+  - **ON_USER** (SQL Server): TW system robot tables
+  - **CTS_DataCenter** (MySQL): Customer roles + Robot category
+  - **Pagination**: Timestamp (time-based)
+  
+  **Common Operations**:
+  - **CTSCustomerClassification** (MySQL): Robot PA classification storage
+  - **MainDB** (External): External visibility for all robots
+  - **Throttling**: Thread.Sleep between chunks for both
+  
+  **Key Differences**:
+  | Aspect | AI Robot | TW Robot |
+  |--------|----------|----------|
+  | Source DB | MySQL | SQL Server |
+  | Pagination | ID-based | Time-based |
+  | Timeout | 300s | 900s (15 min) |
+  | Processing | Single path | Dual path (Agency + Member) |
+  | Detection | Automated AI | Rule-based TW |
+  
+  **Performance Considerations**:
+  - **AI Robot**: Fast queries, simple pagination
+  - **TW Robot**: Complex queries, long timeout, dual routing
+  - **Both**: Batch processing with throttling
+  - **External Push**: Batched for efficiency
+  
+  **Error Handling**:
+  - Failed insert → stop chunk processing
+  - Failed push → return false, log error
+  - Agency API failed (TW) → stop entire flow
+  - Transactional integrity maintained
+end note
+
+|JobService|
+:Complete;
+stop
+
+@enduml
+

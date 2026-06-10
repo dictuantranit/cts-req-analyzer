@@ -1,0 +1,232 @@
+@startuml DangerMonitor_DatabaseFlow_Detailed
+!theme plain
+title Danger Monitor - Detailed Database Flow with Tables and Operations
+
+skinparam component {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+skinparam arrow {
+    Color darkgreen
+}
+
+package "SQL Server Database: bodb02 / WASAVerse" {
+    database "bettrans" as BetTrans
+    database "Match" as Match
+    database "Customer" as Customer
+    database "Exchange" as Exchange
+}
+
+note right of BetTrans
+    **Table: bodb02.dbo.bettrans**
+    * MatchId : INT
+    * CustId : INT
+    * Bettype : INT
+    * BetId : BIGINT
+    * Stake : MONEY
+    * Actualrate : FLOAT
+    * Betteam : NVARCHAR(10)
+    * LiveIndicator : BIT
+end note
+
+note right of Match
+    **Table: bodb02.dbo.Match**
+    * MatchId : INT
+    * HomeId : INT
+    * HomeName : VARCHAR(100)
+    * AwayId : INT
+    * AwayName : VARCHAR(100)
+    * EventDate : DATETIME
+    * GlobalShowTime : SMALLDATETIME
+    * EventStatus : NVARCHAR(50)
+    * SportType : INT
+    * LeagueId : INT
+    * LeagueName : NVARCHAR(500)
+end note
+
+note right of Customer
+    **Table: bodb02.dbo.Customer**
+    * CustId : INT
+    * UserName : VARCHAR(50)
+    * RoleID : TINYINT
+end note
+
+note right of Exchange
+    **Table: bodb02.dbo.Exchange**
+    * CurrencyID : INT
+    * CurrencyName : VARCHAR(50)
+end note
+
+package "Stored Procedures" {
+    component "CTS_MatchTicketInfo_Get" as SP1 {
+        note right
+            **Database:** bodb02/WASAVerse
+            **Operation:** SELECT
+            **Main Tables:**
+            - bettrans (SELECT)
+            - Match (SELECT)
+            - Customer (SELECT via temp table)
+        end note
+    }
+    
+    component "CTS_MatchTicketInfo_Associations_Get" as SP2 {
+        note right
+            **Database:** bodb02/WASAVerse
+            **Operation:** SELECT with Association Filter
+            **Main Tables:**
+            - bettrans (SELECT)
+            - Match (SELECT)
+            - Customer (SELECT with Association)
+        end note
+    }
+    
+    component "CTS_MatchMonitor_Details_GetFilter" as SP3 {
+        note right
+            **Database:** bodb02/WASAVerse
+            **Operation:** SELECT
+            **Main Tables:**
+            - MatchMonitorDetails (SELECT)
+            - Match (SELECT)
+        end note
+    }
+    
+    component "CTS_MatchMonitor_Details_GetTicket" as SP4 {
+        note right
+            **Database:** bodb02/WASAVerse
+            **Operation:** SELECT
+            **Main Tables:**
+            - bettrans (SELECT)
+            - Match (SELECT)
+            - Customer (SELECT)
+            - Exchange (SELECT for CurrencyName)
+        end note
+    }
+}
+
+' Flow for SP1: CTS_MatchTicketInfo_Get
+SP1 --> BetTrans : **SELECT**\n(Filter by Date, Sport, Bettype,\nDangerLevels, Username)
+SP1 --> Match : **SELECT**\n(Get Match Info)
+SP1 --> Customer : **SELECT**\n(Filter by Username)
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Customer : **JOIN**\nON CustId
+
+note right of BetTrans
+    **SELECT Operations:**
+    - Filter by @FromDate, @ToDate
+    - Filter by @SportList
+    - Filter by @BettypeList
+    - Filter by @DangerLevels
+    - Filter by @UserNameList
+    - Filter by @UserAmount, @TotalAmount
+    - WITH(NOLOCK) for performance
+end note
+
+note right of Match
+    **SELECT Operations:**
+    - Get Match details
+    - Filter by EventDate
+    - Filter by LeagueGroup
+    - Get EventStatus, SportType
+end note
+
+' Flow for SP2: CTS_MatchTicketInfo_Associations_Get
+SP2 --> BetTrans : **SELECT**\n(Filter by Association CustIDs)
+SP2 --> Match : **SELECT**
+SP2 --> Customer : **SELECT**\n(Filter by Association Root Users)
+
+note right of SP2
+    **Additional Operations:**
+    - Filter by @AssociationsList (JSON)
+    - Group by RootCustID
+    - Aggregate by Association Groups
+end note
+
+' Flow for SP3: CTS_MatchMonitor_Details_GetFilter
+SP3 --> Match : **SELECT**\n(Get Match Info for Filters)
+
+note right of SP3
+    **Returns:**
+    - Filter options
+    - Date ranges
+    - Bettype options
+    - Customer class options
+    - Reason groups
+end note
+
+' Flow for SP4: CTS_MatchMonitor_Details_GetTicket
+SP4 --> BetTrans : **SELECT**\n(Get Ticket Details)
+SP4 --> Match : **SELECT**\n(Get Match Info)
+SP4 --> Customer : **SELECT**\n(Get Customer Info)
+SP4 --> Exchange : **SELECT**\n(Get CurrencyName)
+
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Customer : **JOIN**\nON CustId
+Customer --> Exchange : **JOIN**\nON CurrencyID
+
+note right of SP4
+    **SELECT Operations:**
+    - Filter by @MatchID
+    - Filter by @BettypeID, @BetID
+    - Filter by @QueryType = 3 (Danger Monitor)
+    - Filter by @ListDanger (JSON)
+    - Filter by @ListStatus
+    - Filter by @ListCustomerClass
+    - Filter by @ListReason
+    - Filter by @FromTransDate, @ToTransDate
+    - WITH(NOLOCK) for performance
+end note
+
+' Temp Tables (Internal to SPs)
+package "Temp Tables (Internal)" {
+    component "#tmpBetType" as TmpBetType
+    component "#tmpCustomer" as TmpCustomer
+    component "#tmpMatchSum" as TmpMatchSum
+    component "#tmpMatchInfo" as TmpMatchInfo
+}
+
+note right of TmpBetType
+    **Temp Table: #tmpBetType**
+    * BetType : INT
+    * BetChoiceType : TINYINT
+    * BetId : BIGINT
+end note
+
+note right of TmpCustomer
+    **Temp Table: #tmpCustomer**
+    * CustId : INT
+end note
+
+note right of TmpMatchSum
+    **Temp Table: #tmpMatchSum**
+    * MatchId : INT
+    * Bettype : INT
+    * TotalAmountHome : MONEY
+    * TotalAmountAway : MONEY
+end note
+
+note right of TmpMatchInfo
+    **Temp Table: #tmpMatchInfo**
+    * MatchId : INT
+    * HomeName : VARCHAR(100)
+    * AwayName : VARCHAR(100)
+    * EventDate : DATETIME
+end note
+
+SP1 --> TmpBetType : **INSERT**\n(Parse @BettypeList JSON)
+SP1 --> TmpCustomer : **INSERT**\n(Filter Customers)
+SP1 --> TmpMatchInfo : **INSERT**\n(Filter Matches)
+SP1 --> TmpMatchSum : **INSERT**\n(Aggregate Results)
+
+TmpBetType --> BetTrans : Used in JOIN
+TmpCustomer --> BetTrans : Used in JOIN
+TmpMatchInfo --> Match : Used in JOIN
+TmpMatchSum --> SP1 : Final Result
+
+@enduml
+

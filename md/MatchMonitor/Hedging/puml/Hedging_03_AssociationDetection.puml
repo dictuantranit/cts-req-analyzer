@@ -1,0 +1,193 @@
+@startuml Hedging_AssociationDetection
+!theme plain
+title Hedging Detection - Association Detection Logic (3 Criteria + Agent Check)
+
+start
+
+:Match group from staging table\n(MatchID, ScoreDiff, BettypeID, BetID, Betteam);
+
+:Extract:\n- CTSCustIDList (CTS internal IDs)\n- AgentDetect_CTSCustIDList (Alpha/Maxbet agents)\n- SequenceIDList;
+
+note right
+    **Example:**
+    CTSCustIDList: "1001,1002,1003,1004"
+    AgentDetect_CTSCustIDList: "1002,1003"
+    (Customers 1002, 1003 are Alpha/Maxbet agents)
+end note
+
+partition "**Round 1: Association Detection**" {
+    :Call Association Detection Service;
+    
+    :Prepare detection parameters;
+    
+    note right
+        **3 Detection Criteria (Always On):**
+        
+        1. **IsDevice = true**
+           - Same device fingerprint
+        
+        2. **IsAI = true**
+           - AI-detected similarity
+        
+        3. **IsIP = true**
+           - Same IP address
+        
+        **Special Parameter:**
+        - **AgentCTSCustIds**
+          For Alpha (168) & Maxbet (169) agents
+        
+        **NOT USED:**
+        - ~~Is3MatchesLast7Days~~
+        - ~~IsIPLast3Days~~
+    end note
+    
+    :Run association detection:\nAssociationDetection.DetectAssociation(param);
+    
+    :Get association result:\n[{CustID: 1001, GroupID: 1},\n {CustID: 1002, GroupID: 1},\n {CustID: 1003, GroupID: 2},\n {CustID: 1004, GroupID: 0}]; -- Unassigned
+    
+    note right
+        **GroupID Assignment:**
+        - GroupID > 0: Detected association
+        - GroupID = 0: No association found
+    end note
+    
+    :Call Process SP with CustGroup JSON;
+    
+    partition "**Inside Process SP**" {
+        :Parse CustGroup JSON into Temp_CustGroup table;
+        
+        :Load tickets from staging\nJOIN with Temp_CustGroup ON CustID;
+        
+        :Group tickets by:\n- GroupID (from association)\n- TimeStep windows (180 seconds);
+        
+        :Calculate IsValidGroup:\nCASE WHEN COUNT(DISTINCT CustID) > 1\nAND SUM(Stake) >= Rule_TotalStake\nTHEN 1 ELSE 0 END;
+        
+        :Create Temp_Completed table:\nGROUP BY GroupID\nHAVING COUNT(DISTINCT TimeGroupID) = 1\nAND MAX(IsValidGroup) = 1;
+        
+        partition "**IsHedging Check Loop**" {
+            :For each GroupID in Temp_Completed:;
+            
+            :Get CustIDList for this group;
+            
+            :Check latest customer classification;
+            
+            note right
+                **Classification Check:**
+                1. Get latest CategoryID per customer
+                2. Check ParentID (not VVIP, not WRAPPER)
+                3. Check if ParentID = PA (Problem Account)
+                4. Check IsHedgingReasonMM = 1
+            end note
+            
+            if (Any customer has IsHedgingReasonMM = 1?) then (yes)
+                :Set IsHedging = TRUE;
+            else (no)
+                :Call Additional SP:\nCTS_DC_Association_IsAssociatedHedgingCustByCustIDList;
+                
+                note right
+                    **Additional Hedging Check:**
+                    - More thorough association check
+                    - Historical hedging patterns
+                    - Cross-platform hedging detection
+                end note
+                
+                if (Associated hedging detected?) then (yes)
+                    :Set IsHedging = TRUE;
+                else (no)
+                    :Set IsHedging = FALSE;
+                endif
+            endif
+            
+            :Update Temp_Completed\nwith IsHedging flag;
+        }
+        
+        :Filter groups where IsHedging = TRUE;
+        
+        if (Has valid groups with IsHedging = TRUE?) then (yes)
+            :Output complete group:\n- GroupID\n- TransIDList\n- CustIDList\n- IsHedging = TRUE;
+        else (no)
+            :No complete groups;
+        endif
+        
+        if (Has unassigned tickets with GroupID = 0?) then (yes)
+            :Output reprocess group:\n- CTSCustIDList (unassigned)\n- SequenceIDList;
+        else (no)
+            :All customers assigned;
+        endif
+    }
+}
+
+if (Has reprocess groups with GroupID = 0?) then (yes)
+    partition "**Round 2: Reprocess Unassigned**" {
+        :Extract unassigned customers:\nCTSCustIDList where GroupID = 0;
+        
+        note right
+            **Example:**
+            Reprocess CTSCustIDList: "1004"
+        end note
+        
+        :Run association detection again:\nAssociationDetection.DetectAssociation(\nreprocessParam);
+        
+        :Get new association result:\n[{CustID: 1004, GroupID: 3}];
+        
+        :Call Process SP again with new CustGroup;
+        
+        :Repeat IsHedging check loop;
+        
+        :Get Round 2 results:\n- Additional complete groups\n- Remaining reprocess groups (if any);
+        
+        note right
+            **Round 2 Purpose:**
+            Some customers may not be detected
+            in Round 1 due to timing or partial data.
+            Round 2 gives them another chance.
+        end note
+    }
+else (no)
+    :All customers assigned;
+endif
+
+partition "**Merge Results**" {
+    :Combine Round 1 and Round 2 results;
+    
+    :Group by TransIDList to avoid duplicates;
+    
+    :Assign final GroupID (sequential: 1, 2, 3, ...);
+    
+    :Filter only groups with IsHedging = TRUE;
+    
+    :Output final detection result:\n[{GroupID: 1, TransIDList: "...", CustIDList: "...", IsHedging: TRUE},\n {GroupID: 2, TransIDList: "...", CustIDList: "...", IsHedging: TRUE},\n ...];
+}
+
+:Save to database\n(Complete & Save phase);
+
+stop
+
+floating note right
+    **Key Differences from Group Betting:**
+    
+    1. **3 Criteria instead of 5**
+       - No "3 Matches Last 7 Days"
+       - No "IP Last 3 Days"
+    
+    2. **Agent Detection Parameter**
+       - AgentCTSCustIds for Alpha/Maxbet
+       - Specific subscriber check
+    
+    3. **IsHedging Flag Check**
+       - Unique to Hedging detection
+       - Based on customer classification
+       - Additional SP for association check
+    
+    4. **Customer Classification Required**
+       - Check IsHedgingReasonMM flag
+       - Only PA categories have this flag
+       - Additional validation layer
+    
+    5. **Same 2-Round Logic**
+       - Round 1: Detect all customers
+       - Round 2: Reprocess unassigned
+end note
+
+@enduml
+

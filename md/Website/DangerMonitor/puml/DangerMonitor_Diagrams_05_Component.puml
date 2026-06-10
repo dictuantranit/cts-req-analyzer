@@ -1,0 +1,82 @@
+@startuml DangerMonitor_Component_Diagram
+!theme plain
+title Danger Monitor - Component Architecture Diagram
+
+package "Presentation Layer" {
+    [DangerMonitorController] as Controller
+    [DangerMonitor Views] as Views
+    [JavaScript/UI] as JS
+}
+
+package "Business Logic Layer" {
+    [DangerMonitorService] as DMService
+    [MatchMonitorService] as MMService
+    [AssociationDetectionService] as AssocService
+    [CommonService] as CommonService
+}
+
+package "Data Access Layer" {
+    [CriteriaService] as CriteriaService
+    [DangerMonitorSearchMatchInfoCriteria] as Criteria1
+    [DangerMonitorSearchMatchInfoWithAssociationRootUserCriteria] as Criteria2
+    [ICriteriaService] as ICriteria
+}
+
+package "Database Layer" {
+    database "SQL Server\n(WASAVerse)" {
+        [CTS_MatchTicketInfo_Get] as SP1
+        [CTS_MatchTicketInfo_Associations_Get] as SP2
+        [CTS_MatchMonitor_Details_GetFilter] as SP3
+        [CTS_MatchMonitor_Details_GetTicket] as SP4
+        [CTS_Sportbettype_Get] as SP5
+    }
+}
+
+package "External Services" {
+    [Fanex API] as API
+    [Memory Cache] as Cache
+}
+
+' Connections
+JS --> Controller : HTTP Requests
+Views --> JS : User Interactions
+Controller --> DMService : Business Logic
+Controller --> MMService : Detail Logic
+Controller --> AssocService : Association Detection
+DMService --> CommonService : Common Operations
+DMService --> MMService : Match Monitor Operations
+DMService --> Cache : Cache Operations
+DMService --> CriteriaService : Data Access
+MMService --> CriteriaService : Data Access
+CriteriaService --> ICriteria : Interface
+ICriteria --> Criteria1 : Implementation
+ICriteria --> Criteria2 : Implementation
+Criteria1 --> SP1 : Execute
+Criteria2 --> SP2 : Execute
+MMService --> SP3 : Execute
+MMService --> SP4 : Execute
+CommonService --> SP5 : Execute
+Controller --> API : API Calls (Optional)
+
+note right of SP1
+  Main Search SP
+  (No Association)
+end note
+
+note right of SP2
+  Search SP with
+  Association Data
+end note
+
+note right of SP3
+  Get Filter Options
+  for Detail Page
+end note
+
+note right of SP4
+  Get Ticket Details
+  for Detail Page
+end note
+
+@enduml
+

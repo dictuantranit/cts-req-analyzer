@@ -1,0 +1,62 @@
+@startuml NormalAccountInsertBySport_SP_Get_Detailed
+!theme plain
+title Normal Account Insert By Sport - SP Get Detailed
+
+start
+
+:Call SP: CTS_BySportNormalClassification_NormalAccount_Get;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Input: @ScannedMaxId (OUTPUT parameter)
+end note
+
+:Get LastScannedRow from CustomerClassification_Parameter;
+note right
+    Table: CustomerClassification_Parameter
+    DataId = 2 (BYSPORT_LASTSCANNEDROW)
+    Get: Value (LastScannedRow as RowVersion)
+end note
+
+:Get NextScannedRow from CustomerClassification_BySport;
+note right
+    Table: CustomerClassification_BySport
+    Get: MAX(RowVersion) as NextScannedRow
+end note
+
+:Create temp table #tmpRawData;
+note right
+    Columns:
+    - ID, CustId, SportGroup, CategoryId
+    - CreatedTime, TurnoverRM, WinlossRM
+    - BetCount, ActiveDays, PerformanceTime
+    - RowVersion
+end note
+
+:Insert TOP 10000 records into #tmpRawData;
+note right
+    Source: CustomerClassification_BySport
+    Filter: RowVersion > LastScannedRow
+    AND RowVersion <= NextScannedRow
+    Order by: RowVersion ASC
+    Limit: TOP 10000
+end note
+
+:Get ScannedMaxId from #tmpRawData;
+note right
+    ScannedMaxId = MAX(RowVersion)
+    This will be used to update parameter later
+end note
+
+:Select distinct customers with latest record;
+note right
+    Use ROW_NUMBER() OVER (PARTITION BY CustId, SportGroup ORDER BY ID DESC)
+    Filter: RowNum = 1
+    Returns: CustId, SportGroup, CategoryId, TurnoverRM, WinlossRM, BetCount, ActiveDays, PerformanceTime
+end note
+
+:Return customer list and ScannedMaxId;
+
+stop
+
+@enduml
+

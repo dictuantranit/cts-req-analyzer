@@ -1,0 +1,203 @@
+@startuml DailyProblemClassification_Sequence
+title Daily Problem Classification - Sequence Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequence {
+  ArrowColor Black
+  ActorBorderColor Black
+  LifeLineBorderColor Black
+  LifeLineBackgroundColor White
+  
+  ParticipantBorderColor Black
+  ParticipantBackgroundColor White
+  ParticipantFontSize 12
+  
+  BoxBorderColor Black
+  BoxBackgroundColor #F0F0F0
+}
+
+actor Scheduler as scheduler
+participant "ClassificationJob\nController" as controller
+participant "DailyProblem\nClassificationJobService" as jobService
+participant "DailyProblem\nClassificationServices" as service
+participant "DailyProblem\nClassificationDataAccess" as dataAccess
+participant "ProblemAccount\nServices" as paService
+participant "CustClassToMainDB\nService" as mainDBService
+database "CTS_DataCenter\n(MySQL)" as mysql
+database "bodb_VR2Model\n(SQL Server)" as sqlserver
+
+scheduler -> controller : POST /scanningDailyProblemClassification
+activate controller
+controller -> jobService : Execute(batchSize)
+activate jobService
+
+jobService -> jobService : Validate batchSize > 0
+jobService -> jobService : JobRun(batchSize)
+
+== Step 1: Initialize & Get Queue ==
+jobService -> service : Start()
+activate service
+service -> service : Initialize PADailyScanFromQueueModel
+service --> jobService : this
+deactivate service
+
+jobService -> service : GetPADailyScanFromQueue()
+activate service
+service -> dataAccess : GetPADailyScanFromQueue()
+activate dataAccess
+dataAccess -> mysql : CTS_DC_CustClassification_DailyScanPA_GetFromQueue()
+activate mysql
+note right
+  Get PA customers from queue
+  FIFO (oldest first)
+  TOP 10000
+end note
+mysql --> dataAccess : PADailyScanFromQueueEntity[]
+deactivate mysql
+dataAccess --> service : PADailyScanFromQueueModel
+deactivate dataAccess
+service --> jobService : this
+deactivate service
+
+== Step 2: Calculate PA Classification ==
+jobService -> service : GetProblemAccountLosingClassification(FunctionId.ProblemDailyJob)
+activate service
+service -> paService : GetProblemAccountLosingClassification(custIDs, funcId)
+activate paService
+paService -> sqlserver : CTS_ProblemAccountsClassification_Daily()
+activate sqlserver
+note right
+  Calculate losing performance
+  - Turnover, Winloss, BetCount
+  - ActiveDays, Performance period
+  - Determine PA category
+  Timeout: 1200 seconds (20 min)
+end note
+sqlserver --> paService : ProblemAccountLosingClassificationEntity[]
+deactivate sqlserver
+paService --> service : ProblemAccountLosingClassificationEntity[]
+deactivate paService
+service --> jobService : ProblemAccountLosingClassificationEntity[]
+deactivate service
+
+== Step 3: Batch Processing ==
+jobService -> jobService : Chunk by batchSize
+
+loop For each batch
+  == Reset for Batch ==
+  jobService -> service : Reset()
+  activate service
+  service -> service : problemAccounts = Empty
+  service --> jobService : this
+  deactivate service
+  
+  == Insert PA Probation ==
+  jobService -> service : InsertProblemAccountProbationClassification(batchSize, problemAccountBatch)
+  activate service
+  service -> service : Convert to JSON
+  service -> dataAccess : InsertProblemProbationClassification(problemAccountJson)
+  activate dataAccess
+  dataAccess -> mysql : CTS_DC_CustClassification_ProblemAccountProbation_Insert()
+  activate mysql
+  note right
+    Parse JSON PA data
+    Insert into CTSCustomerClassification
+    - Set PA category
+    - Set probation period
+    - Detect Robot (IsRobot flag)
+  end note
+  mysql --> dataAccess : InsertPAProbationResult[]
+  deactivate mysql
+  dataAccess --> service : InsertPAProbationResult[]
+  deactivate dataAccess
+  service -> service : Store problemAccounts
+  service --> jobService : this
+  deactivate service
+  
+  == Insert PA Logic (Dual Logic) ==
+  jobService -> service : InsertPALogic()
+  activate service
+  
+  service -> service : Filter: IsRobot = false
+  service -> paService : InsertPALogics(probAccountToInsertLogic, serviceName)
+  activate paService
+  note right
+    Insert regular PA logic
+    Apply PA rules
+  end note
+  paService --> service : void
+  deactivate paService
+  
+  service -> service : Filter: IsRobot = true
+  service -> paService : InsertRobotLogics(robotToInsertLogic)
+  activate paService
+  note right
+    Insert robot PA logic
+    Apply robot-specific rules
+  end note
+  paService --> service : void
+  deactivate paService
+  
+  service --> jobService : this
+  deactivate service
+  
+  == Push to External ==
+  jobService -> service : PushCCToExternal(parameters)
+  activate service
+  service -> service : Get distinct CustIDs
+  service -> mainDBService : PushExternalPackageByCustId(custIds, params)
+  activate mainDBService
+  note right
+    Push to MainDB
+    Parameters:
+    - RoleGroup: Member
+    - ExternalBatchSize
+    - IsUpdateDangerToMainDB: true
+  end note
+  mainDBService --> service : bool (success)
+  deactivate mainDBService
+  service --> jobService : bool
+  deactivate service
+  
+  alt If push failed
+    jobService -> controller : Return false
+    controller -> scheduler : false
+  end
+end
+
+== Step 4: Mark Complete ==
+jobService -> service : UpdateComplete()
+activate service
+service -> service : Join CustIDs to string
+service -> dataAccess : CompletePADailyScan(custIdToString)
+activate dataAccess
+dataAccess -> mysql : CTS_DC_CustClassification_DailyScanPA_Complete()
+activate mysql
+note right
+  DELETE from DailyPAQueue
+  WHERE CustID IN (processed)
+end note
+mysql --> dataAccess : void
+deactivate mysql
+dataAccess --> service : void
+deactivate dataAccess
+service -> service : Check if more in queue
+service --> jobService : bool (isContinue)
+deactivate service
+
+== Step 5: Recursive Call ==
+alt If more customers in queue
+  jobService -> jobService : **Recursive Call**: JobRun(batchSize)
+  note right
+    Continue processing until queue empty
+  end note
+end
+
+jobService --> controller : true
+deactivate jobService
+controller --> scheduler : true
+deactivate controller
+
+@enduml
+

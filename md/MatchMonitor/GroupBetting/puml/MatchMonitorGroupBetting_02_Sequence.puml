@@ -1,0 +1,341 @@
+@startuml MatchMonitorGroupBetting_Sequence
+!theme plain
+title Match Monitor Group Betting - Sequence Diagram (Complete Flow)
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "MatchMonitor\nController" as Controller
+participant "MatchMonitorJob\nService" as JobService
+participant "MatchMonitorStaging\nService" as StagingService
+participant "SystemParameter\nService" as SystemParam
+participant "MatchMonitorRuleGroupBetting\nService" as RuleGBService
+participant "MatchMonitorRuleGroupBettingProcess\nService" as ProcessService
+participant "AssociationDetection\nService" as AssociationService
+participant "MatchMonitorRuleGroupBetting\nDataAccess" as DataAccess
+database "MySQL\nCTS_DataCenter" as MySQL
+database "SQL Server\nMainDB" as MainDB
+
+== PHASE 1: STAGING - Insert Ticket Detail ==
+
+Scheduler -> Controller: POST /api/matchmonitor/MatchMonitorInsertTicketDetailLive\nsize=1000
+activate Controller
+
+Controller -> JobService: InsertTicketDetail(size=1000, isLive=true)
+activate JobService
+
+JobService -> StagingService: GetService<IMatchMonitorStagingService>()
+activate StagingService
+
+StagingService -> StagingService: Start(batchSize=1000, isLive=true)
+note right
+    Initialize:
+    - BatchSize = 1000
+    - IsLive = true
+    - LastScannedSequenceID_ParameterID
+    - PoolEnumType
+end note
+
+StagingService -> StagingService: GetLastScannedSequenceID()
+StagingService -> SystemParam: GetLastScannedId(ParameterID)
+activate SystemParam
+SystemParam -> MySQL: SELECT ParameterValue FROM SystemParameter\nWHERE ParameterID = ?
+activate MySQL
+MySQL --> SystemParam: LastSequenceID = 12345678
+deactivate MySQL
+SystemParam --> StagingService: 12345678
+deactivate SystemParam
+
+StagingService -> StagingService: GetMatchTrans()
+StagingService -> SystemParam: GetBetTypeSettings(FunctionID=MMBetType)
+activate SystemParam
+SystemParam -> MySQL: SELECT SportTypeID, BetTypeID, BetChoiceType\nFROM BetTypeSettings WHERE ...
+activate MySQL
+MySQL --> SystemParam: BetTypeInfo[]
+deactivate MySQL
+SystemParam --> StagingService: BetTypeInfosJson
+deactivate SystemParam
+
+StagingService -> DataAccess: GetMatchTrans(lastSequenceID, batchSize, isLive, betTypeInfos)
+activate DataAccess
+DataAccess -> MainDB: EXEC CTS_MatchMonitor_GetTicketTrans\n@LastSequenceID=12345678\n@BatchSize=1000\n@IsLive=1\n@BetTypeInfos='[...]'
+activate MainDB
+note right of MainDB
+    SELECT TOP 1000
+        SequenceID, MatchID, BetID, BettypeID,
+        CustID, CTSCustID, Amount, Odds,
+        Betteam, ScoreDiff, SportType
+    FROM TicketTrans
+    WHERE SequenceID > 12345678
+        AND IsLive = 1
+        AND BettypeID IN (...)
+    ORDER BY SequenceID
+end note
+MainDB --> DataAccess: TicketDetailEntity[] (1000 records)
+deactivate MainDB
+DataAccess --> StagingService: TicketDetailEntity[]
+deactivate DataAccess
+
+StagingService -> StagingService: InsertMatchMonitorStagingWithParallel()
+note right of StagingService
+    Convert tickets to JSON
+    Parallel insert to multiple pools
+end note
+
+par Parallel Insert to Pools
+    StagingService -> DataAccess: InsertMatchMonitorStaging(JSON, isLive=1, poolType=1)
+    activate DataAccess
+    DataAccess -> MySQL: EXEC CTS_MatchMonitor_InsertStaging\n@MatchTransJson='[...]'\n@IsLive=1\n@PoolType=1 (GroupBetting)
+    activate MySQL
+    MySQL --> DataAccess: Success
+    deactivate MySQL
+    deactivate DataAccess
+else
+    StagingService -> DataAccess: InsertMatchMonitorStaging(JSON, isLive=1, poolType=2)
+    activate DataAccess
+    DataAccess -> MySQL: EXEC CTS_MatchMonitor_InsertStaging\n@PoolType=2 (Hedging)
+    activate MySQL
+    MySQL --> DataAccess: Success
+    deactivate MySQL
+    deactivate DataAccess
+else
+    StagingService -> DataAccess: InsertMatchMonitorStaging(JSON, isLive=1, poolType=3)
+    activate DataAccess
+    DataAccess -> MySQL: EXEC CTS_MatchMonitor_InsertStaging\n@PoolType=3 (Arbitrage)
+    activate MySQL
+    MySQL --> DataAccess: Success
+    deactivate MySQL
+    deactivate DataAccess
+end
+
+StagingService -> StagingService: UpdateLastScannedSequenceID()
+StagingService -> SystemParam: UpdateValueForSystemParamById(maxSequenceID, ParameterID)
+activate SystemParam
+SystemParam -> MySQL: UPDATE SystemParameter\nSET ParameterValue = 12346678\nWHERE ParameterID = ?
+activate MySQL
+MySQL --> SystemParam: Success
+deactivate MySQL
+deactivate SystemParam
+
+StagingService --> JobService: Success
+deactivate StagingService
+JobService --> Controller: true
+deactivate JobService
+Controller --> Scheduler: HTTP 200 OK { success: true }
+deactivate Controller
+
+note over Scheduler, MySQL
+    ========================================================
+    PHASE 1 COMPLETE: Tickets inserted into Staging
+    Ready for Phase 2: Rule Processing
+    ========================================================
+end note
+
+== PHASE 2: PROCESSING - Detect Group Betting ==
+
+Scheduler -> Controller: POST /api/matchmonitor/MatchMonitorProcessRuleGroupBettingLive\nnumberOfThread=4\nsportsDevice=1,2,3,4,5\nsportsAI=1,2,3,4,5\nsportsIP=1,2,3,4,5\nsports3MatchesLast7Days=1,2,3,4,5\nsportsIPLast3Days=1,2,3,4,5
+activate Controller
+
+Controller -> Controller: Create MatchDetectAssociationSettingModel
+note right of Controller
+    Parse sport settings:
+    - DeviceSports = {1,2,3,4,5}
+    - AISports = {1,2,3,4,5}
+    - IPSports = {1,2,3,4,5}
+    - 3MatchesLast7DaysSports = {1,2,3,4,5}
+    - IPLast3DaysSports = {1,2,3,4,5}
+end note
+
+Controller -> JobService: ProcessRuleGroupBetting(isLive=true, numberOfThread=4, assDetectSetting)
+activate JobService
+
+JobService -> RuleGBService: GetMatchRuleGroupBetting(isLive=true)
+activate RuleGBService
+
+RuleGBService -> DataAccess: GetMatchRuleGroupBetting(isLive=true)
+activate DataAccess
+
+DataAccess -> MySQL: EXEC CTS_MatchMonitor_RuleGroupBetting_Get\n@IsLive=1
+activate MySQL
+note right of MySQL
+    -- Get MaxSequenceID
+    SELECT MAX(SequenceID) as MaxSequenceID
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive=1 AND PoolType=1 AND IsProcessed=0;
+    
+    -- Get Match List (Grouped)
+    SELECT MatchID, ScoreDiff, BettypeID, BetID, Betteam,
+           GROUP_CONCAT(SequenceID) as SequenceIDList,
+           GROUP_CONCAT(CTSCustID) as CTSCustIDList,
+           GROUP_CONCAT(CustID) as CustIDList,
+           SportType
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive=1 AND PoolType=1 AND IsProcessed=0
+    GROUP BY MatchID, ScoreDiff, BettypeID, BetID, Betteam;
+end note
+MySQL --> DataAccess: MaxSequenceID=12346678\nMatchStagingList[] (50 matches)
+deactivate MySQL
+
+DataAccess --> RuleGBService: MatchMonitorRuleModel\n- MaxSequenceID\n- MatchStagingList[]
+deactivate DataAccess
+
+RuleGBService -> RuleGBService: Group matches by key\n(MatchID, ScoreDiff, BettypeID, BetID, Betteam)
+RuleGBService --> JobService: MatchStagingRuleGroupBettingProcessModel
+deactivate RuleGBService
+
+JobService -> JobService: Parallel process matches\nAsParallel().WithDegreeOfParallelism(4)
+
+par Process Match 1 (Thread 1)
+    JobService -> ProcessService: GetInstanceProcessGroupBettingService()
+    activate ProcessService
+    
+    ProcessService -> ProcessService: PrepareProcess(matchInfo, isLive=true, assDetectSetting)
+    note right of ProcessService
+        Initialize:
+        - MatchStaging = matchInfo
+        - IsLive = true
+        - AssDetectSetting
+        - MatchProcesses = []
+    end note
+    
+    ProcessService -> ProcessService: ProcessRound1()
+    loop For each customer group in match
+        ProcessService -> ProcessService: ProcessWithAssociationRound1(matchInfo)
+        ProcessService -> AssociationService: DetectAssociationLv1(param)
+        activate AssociationService
+        note right of AssociationService
+            Parameters:
+            - CTSCustIds
+            - CustIds
+            - IsDevice (check sport in DeviceSports)
+            - IsAI (check sport in AISports)
+            - IsIP (check sport in IPSports)
+            - Is3MatchesLast7Days
+            - IsIPLast3Days
+        end note
+        AssociationService -> MySQL: EXEC CTS_AssociationDetection_Lv1\n@CTSCustIds, @CustIds, @IsDevice, ...
+        activate MySQL
+        MySQL --> AssociationService: DetectAssociationMergeGroupLv1Entity[]\n(with GroupID)
+        deactivate MySQL
+        AssociationService --> ProcessService: Associations with GroupID
+        deactivate AssociationService
+        
+        alt Has GroupID
+            ProcessService -> DataAccess: ProcessRuleGroupBetting(isLive, matchInfo, sequenceIDList, groupDetection)
+            activate DataAccess
+            DataAccess -> MySQL: EXEC CTS_MatchMonitor_RuleGroupBetting_Process\n@IsLive, @MatchInfo, @SequenceIDList, @GroupDetection
+            activate MySQL
+            MySQL --> DataAccess: MatchProcessRuleGroupBettingModel\n(CompleteMatches, ReprocessMatches)
+            deactivate MySQL
+            DataAccess --> ProcessService: MatchProcessRuleGroupBettingModel
+            deactivate DataAccess
+            ProcessService -> ProcessService: Add to MatchProcesses[]
+        end
+    end
+    
+    ProcessService -> ProcessService: ProcessRound2()
+    loop For each reprocess match
+        ProcessService -> ProcessService: ProcessWithAssociationRound2(matchInfo, reprocessModel)
+        ProcessService -> AssociationService: DetectAssociationLv1(param)
+        activate AssociationService
+        AssociationService -> MySQL: EXEC CTS_AssociationDetection_Lv1
+        activate MySQL
+        MySQL --> AssociationService: DetectAssociationMergeGroupLv1Entity[]
+        deactivate MySQL
+        AssociationService --> ProcessService: Associations with GroupID
+        deactivate AssociationService
+        
+        alt Has GroupID
+            ProcessService -> DataAccess: ProcessRuleGroupBetting(...)
+            activate DataAccess
+            DataAccess -> MySQL: EXEC CTS_MatchMonitor_RuleGroupBetting_Process
+            activate MySQL
+            MySQL --> DataAccess: MatchProcessRuleGroupBettingModel (Round 2)
+            deactivate MySQL
+            DataAccess --> ProcessService: MatchProcessRuleGroupBettingModel
+            deactivate DataAccess
+            ProcessService -> ProcessService: Add to MatchProcesses[] with RoundNumber=2
+        end
+    end
+    
+    ProcessService -> ProcessService: Complete(maxSequenceID)
+    note right of ProcessService
+        1. Merge Round 1 & Round 2 results
+        2. Group by TransIDList (remove duplicates)
+        3. Assign GroupID (sequential: 1, 2, 3, ...)
+        4. Convert to JSON
+    end note
+    
+    alt Has Complete Matches
+        ProcessService -> DataAccess: CompleteTransRuleGroupBetting(para)
+        activate DataAccess
+        DataAccess -> MySQL: EXEC CTS_MatchMonitor_RuleGroupBetting_Complete\n@IsLive, @MatchInfo, @MaxSequenceID, @TransGroupJson
+        activate MySQL
+        note right of MySQL
+            -- Insert results
+            INSERT INTO CTSMatchMonitorRuleGroupBetting
+            (MatchID, GroupID, TransIDList, CustIDList, ...)
+            SELECT ... FROM JSON_TABLE(@TransGroupJson, ...);
+            
+            -- Mark as processed
+            UPDATE CTSMatchMonitorStaging
+            SET IsProcessed=1, ProcessedDate=NOW()
+            WHERE SequenceID IN (...);
+        end note
+        MySQL --> DataAccess: Success
+        deactivate MySQL
+        DataAccess --> ProcessService: Success
+        deactivate DataAccess
+    end
+    
+    ProcessService -> ProcessService: WriteLogSentryIfError("ProcessRuleGroupBetting")
+    note right of ProcessService
+        Check if Round 2 has unresolved items
+        Log to Sentry if errors found
+    end note
+    
+    ProcessService --> JobService: Complete
+    deactivate ProcessService
+    
+else Process Match 2 (Thread 2)
+    JobService -> ProcessService: Process Match 2
+    note right: Same flow as Match 1
+    
+else Process Match 3 (Thread 3)
+    JobService -> ProcessService: Process Match 3
+    note right: Same flow as Match 1
+    
+else Process Match 4 (Thread 4)
+    JobService -> ProcessService: Process Match 4
+    note right: Same flow as Match 1
+end
+
+JobService -> JobService: Wait for all threads to complete
+
+JobService -> RuleGBService: CleanTransRuleGroupBetting(isLive=true, maxSequenceID)
+activate RuleGBService
+RuleGBService -> DataAccess: CleanTransRuleGroupBetting(isLive=true, maxSequenceID)
+activate DataAccess
+DataAccess -> MySQL: EXEC CTS_MatchMonitor_RuleGroupBetting_Clean\n@IsLive=1\n@MaxSequenceID=12346678
+activate MySQL
+note right of MySQL
+    DELETE FROM CTSMatchMonitorStaging
+    WHERE IsLive=1
+        AND PoolType=1
+        AND IsProcessed=1
+        AND SequenceID <= 12346678
+        AND ProcessedDate < DATE_SUB(NOW(), INTERVAL 7 DAY);
+end note
+MySQL --> DataAccess: Deleted rows count
+deactivate MySQL
+DataAccess --> RuleGBService: Success
+deactivate DataAccess
+RuleGBService --> JobService: Success
+deactivate RuleGBService
+
+JobService --> Controller: true
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK { success: true }
+deactivate Controller
+
+@enduml
+

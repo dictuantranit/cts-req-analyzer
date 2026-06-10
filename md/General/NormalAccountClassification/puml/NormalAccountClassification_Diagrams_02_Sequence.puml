@@ -1,0 +1,164 @@
+@startuml NormalAccountClassification_Sequence
+!theme plain
+title Normal Account Classification - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationJob\nController" as Controller
+participant "NormalAccountClassification\nJobService" as JobService
+participant "NormalAccountClassification\nService" as Service
+participant "NormalAccountClassification\nDataAccess" as DataAccess
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "MySQL\nCTS_DataCenter" as DataCenterDB
+
+Scheduler -> Controller: POST /api/classificationJobs/normalAccountClassification\nbatchInternalSize
+activate Controller
+
+Controller -> JobService: Execute(batchInternalSize)
+activate JobService
+
+alt batchInternalSize <= 0
+    JobService -> JobService: Set batchInternalSize = 5000 (default)
+end
+
+' Step 1: GetNormalPoolCustomers
+JobService -> Service: GetNormalPoolCustomers()
+activate Service
+
+Service -> DataAccess: GetNormalPoolCustomers()
+activate DataAccess
+
+DataAccess -> DataAccess: Create GetNormalPoolCustomerCriteria
+DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_NormalPool_Get\n@ScannedMaxId OUTPUT
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Get unprocessed from Normal Pool
+    - Order by Priority DESC, ID ASC
+    - Return: CustId, IsRealtimeOnly,
+      ScanTaggingType, ScanSpecialLicSubType
+    - Output: ScannedMaxId
+end note
+VR2DB --> DataAccess: ResultSet: GetNormalPoolCustomerEntity[]\nScannedMaxId
+deactivate VR2DB
+
+DataAccess -> DataAccess: Map to GetNormalPoolCustomerModel
+DataAccess --> Service: GetNormalPoolCustomerModel
+deactivate DataAccess
+
+Service --> JobService: GetNormalPoolCustomerModel
+deactivate Service
+
+alt Has Customers
+    JobService -> JobService: Chunk customers by batchInternalSize
+    
+    ' Step 2: GetCurrentCustomerCategory (batched)
+    loop For each chunk
+        JobService -> JobService: Select CustID and ScanSpecialLicSubType\ninto GetCurrentCCParamModel
+        
+        JobService -> Service: GetCurrentCustomerCategory(custInfos)
+        activate Service
+        
+        Service -> Service: Serialize custInfos to JSON
+        
+        Service -> DataAccess: GetCurrentCustomerCategory(custInfosJson)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create GetCurrentNormalCategoryCriteria\nCustInfos = JSON
+        DataAccess -> DataCenterDB: EXEC CTS_DC_CustClassification_Normal_GetCurrentCategory\n@ip_CustInfo (JSON)
+        activate DataCenterDB
+        note right of DataCenterDB
+            Stored Procedure:
+            - Parse JSON customer list
+            - Get current classification
+            - Return: CustID, CategoryID,
+              IsNewCreated, IsProbationLastDay,
+              IsSpecialLicSubCC
+        end note
+        DataCenterDB --> DataAccess: ResultSet: GetCurrentNormalCategoryEntity[]
+        deactivate DataCenterDB
+        
+        DataAccess --> Service: GetCurrentNormalCategoryEntity[]
+        deactivate DataAccess
+        
+        Service --> JobService: GetCurrentNormalCategoryEntity[]
+        deactivate Service
+    end
+    
+    ' Step 3: Join data
+    JobService -> JobService: LINQ Join:\nNormalPoolCustomers + CustomerCategories\n→ GetCurrentCustomerCategoryModel[]
+    
+    ' Step 4: Parallel Classification
+    JobService -> JobService: Chunk joined data by batchInternalSize
+    
+    par Process batch 1
+        JobService -> JobService: [Thread 1] ClassifyBatch(custBatch, scannedMaxId)
+        activate JobService #DarkSalmon
+        
+        JobService -> JobService: Serialize batch to XML\nusing ToXmlString()
+        
+        JobService -> Service: ClassifyNormalPoolCustomers(customerXML)
+        activate Service #DarkSalmon
+        
+        Service -> DataAccess: ClassifyNormalPoolCustomers(customerXML)
+        activate DataAccess #DarkSalmon
+        
+        DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_NormalPool_Classify\n@CustomersXML
+        activate VR2DB #DarkSalmon
+        note right of VR2DB
+            Parse XML & Apply classification
+            based on all flags
+        end note
+        VR2DB --> DataAccess: Success
+        deactivate VR2DB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service --> JobService: INormalAccountClassificationService
+        deactivate Service
+        
+        JobService -> JobService: Join CustIds to comma-separated string
+        
+        JobService -> Service: ClearNormalPoolCustomers(custIds, scannedMaxId)
+        activate Service #DarkSalmon
+        
+        Service -> DataAccess: ClearNormalPoolCustomers(custIdList, scannedMaxId)
+        activate DataAccess #DarkSalmon
+        
+        DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_NormalPool_Clear\n@ListCustId, @ScannedMaxId
+        activate VR2DB #DarkSalmon
+        VR2DB --> DataAccess: Success
+        deactivate VR2DB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service --> JobService: INormalAccountClassificationService
+        deactivate Service
+        
+        deactivate JobService
+    else Process batch 2
+        JobService -> JobService: [Thread 2] ClassifyBatch(...)
+        note right: Same flow as Thread 1
+    else Process batch 3
+        JobService -> JobService: [Thread 3] ClassifyBatch(...)
+        note right: Same flow as Thread 1
+    else Process batch 4
+        JobService -> JobService: [Thread 4] ClassifyBatch(...)
+        note right: Same flow as Thread 1
+    end
+    
+else No Customers
+    note right of JobService
+        Normal Pool is empty
+    end note
+end
+
+JobService --> Controller: Task<bool> (true)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true }
+deactivate Controller
+
+@enduml
+

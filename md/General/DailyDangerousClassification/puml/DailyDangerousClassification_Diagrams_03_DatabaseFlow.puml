@@ -1,0 +1,351 @@
+@startuml DailyDangerousClassification_DatabaseFlow
+title Daily Dangerous Classification - Database Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam databaseBackgroundColor #E8F5E9
+skinparam databaseBorderColor #4CAF50
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+
+|Service Layer|
+start
+:JobRun(batchSize, isLicensee);
+note right
+  **isLicensee Parameter**:
+  - true: Process Deposit (Licensee) customers
+  - false: Process Credit customers
+  
+  Separate runs for each type
+end note
+
+:Prepare PushDataToExternalEntity;
+
+== Do-While Loop ==
+note right
+  **Pagination Loop**:
+  Continue until LastCustID = 0
+  Separate tracking for Deposit vs Credit
+end note
+
+repeat
+  |DataAccess Layer|
+  :GetDangerousClassification(isLicensee);
+  
+  |CTS_DataCenter (MySQL)|
+  :Execute SP: **CTS_DC_DangerousDetection_GetLatest**;
+  note right
+    **Database**: CTS_DataCenter.ctsService
+    **Timeout**: 300 seconds (default)
+    
+    **Purpose**: Get dangerous customers from AI/ML detection
+    **Input**: @ip_IsLicensee (bool)
+    
+    **Query Logic**:
+    ```sql
+    -- Get pagination state
+    SELECT Value INTO @LastCustID
+    FROM CTS_SystemParameter
+    WHERE ParameterKey = CASE @ip_IsLicensee
+      WHEN 1 THEN 'DangerousScoreClassification_Deposit_LastCustID'
+      ELSE 'DangerousScoreClassification_Credit_LastCustID'
+    END
+    
+    SELECT Value INTO @LastScannedDate
+    FROM CTS_SystemParameter
+    WHERE ParameterKey = CASE @ip_IsLicensee
+      WHEN 1 THEN 'DangerousScoreClassification_Deposit_LastScannedDate'
+      ELSE 'DangerousScoreClassification_Credit_LastScannedDate'
+    END
+    
+    -- First Result Set: Pagination Info
+    SELECT 
+      MAX(CustID) AS LastCustID,
+      MAX(ClassifiedDate) AS LastScannedDate
+    FROM DangerousDetection
+    WHERE IsLicensee = @ip_IsLicensee
+      AND CustID > @LastCustID
+      AND ClassifiedDate > @LastScannedDate
+      AND ClassifiedScore > @DangerousThreshold
+    LIMIT 10000
+    
+    -- Second Result Set: Dangerous Customers
+    SELECT 
+      CustID,
+      CTSCustID,
+      SubscriberID,
+      RoleID,
+      CategoryID,          -- PA category
+      CategoryGroup,       -- PA group
+      ClassifiedDate,      -- AI detection date
+      ClassifiedScore      -- Dangerous score
+    FROM DangerousDetection
+    WHERE IsLicensee = @ip_IsLicensee
+      AND CustID > @LastCustID
+      AND ClassifiedDate > @LastScannedDate
+      AND ClassifiedScore > @DangerousThreshold
+    ORDER BY CustID
+    LIMIT 10000
+    ```
+    
+    **Data Source**: AI/ML Detection System ⭐
+    - Dangerous scores calculated by ML models
+    - Stored in DangerousDetection table
+    - Threshold-based filtering
+    
+    **Returns**: Multiple Result Sets
+    1. DangerousToCCLastScannedEntity (pagination)
+    2. DangerousToCCEntity[] (customers)
+  end note
+
+  |AI/ML Detection System|
+  note right
+    **AI/ML Process** (Upstream):
+    
+    1. **Data Collection**:
+       - Customer betting patterns
+       - Transaction history
+       - Behavioral data
+       - Account activity
+    
+    2. **ML Model Prediction**:
+       - Feature extraction
+       - Risk scoring algorithm
+       - Dangerous score calculation
+       - Confidence level
+    
+    3. **Storage**:
+       - INSERT INTO DangerousDetection
+       - ClassifiedScore (dangerous score)
+       - ClassifiedDate (detection timestamp)
+       - CategoryID (PA category suggestion)
+    
+    **Dangerous Score Factors**:
+    - Betting pattern anomalies (30%)
+    - Win/loss patterns (25%)
+    - Transaction patterns (25%)
+    - Behavioral patterns (20%)
+    
+    **Score Range**: 0-100 (higher = more dangerous)
+    **Threshold**: e.g., > 70 = dangerous
+  end note
+
+  :Return Multiple Result Sets;
+  
+  |Service Layer|
+  :Store DangerousToCCModel;
+  note right
+    **Model Contents**:
+    - DangerousCCLastScanned:
+      * LastCustID (pagination)
+      * LastScannedDate (pagination)
+    - DangerousCCs[]:
+      * Customer list to process
+  end note
+
+  :Check isContinue = (LastCustID > 0);
+
+  if (isContinue?) then (yes)
+    :Transform to InsertProblemAccountEntity;
+    note right
+      **Transformation**:
+      DangerousToCCEntity → InsertProblemAccountEntity
+      
+      Map:
+      - CustID, CTSCustID
+      - CategoryID, CategoryGroupID
+      - IsLicensee (from parameter)
+      - CreatedBy = StarixITId
+      - **IsFromAI = true** ⭐
+      - Other flags = false
+    end note
+
+    :Chunk by externalBatchSize;
+
+    repeat
+      |Service Layer|
+      :InsertProblemAccountPackage(chunk);
+      
+      |Various DBs (via ProblemAccountServices)|
+      :Insert PA Classification;
+      note right
+        **Insert Operations**:
+        
+        1. **CTSCustomerClassification** (MySQL):
+           ```sql
+           INSERT INTO CTSCustomerClassification
+           (CustID, CategoryID, CategoryGroupID,
+            IsFromAI, CreatedBy, InsertedDate, ...)
+           VALUES (...)
+           ON DUPLICATE KEY UPDATE
+             CategoryID = VALUES(CategoryID),
+             IsFromAI = true,
+             UpdatedDate = NOW()
+           ```
+        
+        2. **Apply PA Rules**:
+           - FunctionId: DailyDangerousClassification
+           - CCInputFlow: Potential
+           - PA logic insertion
+           - Risk scoring
+        
+        3. **Return**: Inserted CustIDs
+        
+        **Key Fields**:
+        - IsFromAI = true (AI detection marker)
+        - CreatedBy = StarixITId
+        - CategoryID from AI prediction
+      end note
+
+      :Return Inserted CustIDs;
+      
+      |Service Layer|
+      :PushExternalPackageByCustId(custIDs);
+      
+      |External - MainDB|
+      :Push to MainDB API;
+      note right
+        **External Push**:
+        
+        **Purpose**: Sync dangerous classification to MainDB
+        **Input**: CustIDs from PA insert
+        
+        **Parameters**:
+        - RoleGroup: Member
+        - ExternalBatchSize: chunk size
+        - IsUpdateDangerToMainDB: true
+        
+        **Process**:
+        1. Get classification data by CustIDs
+        2. Format for external system
+        3. POST to MainDB API endpoint
+        4. Update external visibility
+        5. Enable external monitoring
+        
+        **Batching**:
+        - Chunk by ExternalBatchSize
+        - Parallel push for efficiency
+        - Error handling per batch
+        
+        **Makes Visible**:
+        - Dangerous classification
+        - AI detection flag
+        - Risk scores
+        - PA categorization
+      end note
+
+      :Return success status;
+
+    repeat while (More chunks?) is (yes)
+    -> no;
+
+    |System Parameters|
+    :Update LastCustID;
+    |CTS_DataCenter (MySQL)|
+    :UPDATE CTS_SystemParameter;
+    note right
+      **Update Query**:
+      ```sql
+      UPDATE CTS_SystemParameter
+      SET Value = @LastCustID,
+          UpdatedDate = NOW()
+      WHERE ParameterKey = CASE @IsLicensee
+        WHEN 1 THEN 'DangerousScoreClassification_Deposit_LastCustID'
+        ELSE 'DangerousScoreClassification_Credit_LastCustID'
+      END
+      ```
+      
+      **Purpose**: Track progress for next batch
+      **Enables**: Resumable processing
+    end note
+
+    |System Parameters|
+    :Update LastScannedDate;
+    |CTS_DataCenter (MySQL)|
+    :UPDATE CTS_SystemParameter;
+    note right
+      **Update Query**:
+      ```sql
+      UPDATE CTS_SystemParameter
+      SET Value = @LastScannedDate,
+          UpdatedDate = NOW()
+      WHERE ParameterKey = CASE @IsLicensee
+        WHEN 1 THEN 'DangerousScoreClassification_Deposit_LastScannedDate'
+        ELSE 'DangerousScoreClassification_Credit_LastScannedDate'
+      END
+      ```
+      
+      **Purpose**: Secondary pagination filter
+      **Benefit**: Avoids re-processing by date
+    end note
+  else (no)
+    note right
+      No more dangerous customers
+      for current customer type
+    end note
+  endif
+
+repeat while (isContinue = true?) is (yes)
+-> no;
+
+|Service Layer|
+:Complete;
+note right
+  **Job Completion**:
+  - All dangerous customers processed
+  - System parameters updated
+  - Ready for next customer type run
+  
+  **Two Separate Runs**:
+  1. Run with isLicensee = true (Deposit)
+  2. Run with isLicensee = false (Credit)
+end note
+
+stop
+
+note bottom
+  **Database Architecture**:
+  
+  **CTS_DataCenter (MySQL)**:
+  - DangerousDetection (AI/ML output storage)
+  - CTSCustomerClassification (PA classification)
+  - CTS_SystemParameter (pagination tracking)
+  
+  **AI/ML Detection System**:
+  - Calculates dangerous scores
+  - Predicts PA categories
+  - Stores in DangerousDetection table
+  - Continuous monitoring and scoring
+  
+  **External - MainDB**:
+  - Receives dangerous classifications
+  - External visibility and monitoring
+  - Integration with other systems
+  
+  **Pagination Mechanism**:
+  1. Dual keys: LastCustID + LastScannedDate
+  2. Separate for Licensee and Credit
+  3. System parameters store progress
+  4. Resumable across job runs
+  5. No risk of re-processing
+  
+  **Data Flow**:
+  AI/ML → DangerousDetection → GetLatest → 
+  Transform → InsertPA → PushMainDB → UpdateParams
+  
+  **Performance Considerations**:
+  - Batch size: 10,000 customers per SP call
+  - Chunk size: configurable for external push
+  - Indexed on: IsLicensee, CustID, ClassifiedDate, ClassifiedScore
+  - Efficient pagination with composite keys
+  
+  **Key Flags**:
+  - IsFromAI = true: Marks AI detection
+  - IsLicensee: Separates customer types
+  - IsUpdateDangerToMainDB = true: Push enabled
+end note
+
+@enduml
+

@@ -1,0 +1,104 @@
+@startuml NormalAccountInsertBySport_Sequence
+!theme plain
+title Normal Account Insert By Sport - Sequence Diagram
+
+actor JobScheduler
+participant "NormalAccountInsertBySportJobService" as JobService
+participant "NormalAccountInsertBySportService" as Service
+participant "NormalAccountInsertBySportDataAccess" as DataAccess
+participant "BaseCustomerClassificationBySportService" as BaseService
+participant "BaseCustomerClassificationBySportDataAccess" as BaseDataAccess
+participant "CustClassToMainDBService" as MainDBService
+database "SQL Server\n(bodb_VR2Model)" as SQLServer
+database "MySQL\n(CTS_DataCenter)" as MySQL
+database "Main DB" as MainDB
+
+JobScheduler -> JobService: Execute(batchExternalSize, batchInternalSize)
+activate JobService
+
+loop do-while (isContinue)
+    JobService -> Service: GetNormalClassificationBySport()
+    activate Service
+    Service -> DataAccess: GetNormalClasificationAccount()
+    activate DataAccess
+    DataAccess -> SQLServer: CTS_BySportNormalClassification_NormalAccount_Get
+    activate SQLServer
+    SQLServer --> DataAccess: NormalAccount list, ScannedMaxId
+    deactivate SQLServer
+    DataAccess --> Service: GetNormalAccountBySportModel
+    deactivate DataAccess
+    Service --> JobService: newClassifications
+    deactivate Service
+    
+    alt Has NormalAccount
+        JobService -> JobService: Chunk customers (batchInternalSize)
+        JobService -> JobService: Process chunks in parallel (4 threads)
+        
+        par For Each Chunk
+            alt CategoryId != -1 (Normal Accounts)
+                JobService -> Service: InsertNormalClassificationBySport(custs, serviceName)
+                activate Service
+                Service -> Service: Serialize to JSON
+                Service -> BaseService: InsertCustomerClassificationBySport(BySportInsertNormal, model, serviceName)
+                activate BaseService
+                BaseService -> BaseDataAccess: InsertCustomerClassificationBySport(inputFlow, model)
+                activate BaseDataAccess
+                BaseDataAccess -> MySQL: CTS_DC_CustClassification_BySport_Insert
+                activate MySQL
+                MySQL --> BaseDataAccess: CustInfos, ErrorMessage
+                deactivate MySQL
+                BaseDataAccess --> BaseService: ResultInsertClassificationBySportModel
+                deactivate BaseDataAccess
+                BaseService --> Service: result
+                deactivate BaseService
+                Service --> JobService: resultInsertNormalAccount
+                deactivate Service
+                
+                alt Insert Success
+                    JobService -> JobService: Transform to InsertNormalAccountCustInfoEntity
+                    JobService -> MainDBService: PushCCBySportToMainDB(pushCC, serviceName, batchExternalSize)
+                    activate MainDBService
+                    MainDBService -> MainDB: Push classification data
+                    activate MainDB
+                    MainDB --> MainDBService: Success
+                    deactivate MainDB
+                    MainDBService --> JobService: Success
+                    deactivate MainDBService
+                end
+            end
+            
+            alt CategoryId == -1 (Special CC)
+                JobService -> JobService: Transform to InsertNormalAccountCustInfoEntity
+                JobService -> MainDBService: PushCCBySportToMainDB(pushCCListSpecialCC, serviceName, batchExternalSize)
+                activate MainDBService
+                MainDBService -> MainDB: Push Special CC data
+                activate MainDB
+                MainDB --> MainDBService: Success
+                deactivate MainDB
+                MainDBService --> JobService: Success
+                deactivate MainDBService
+            end
+        end
+        
+        JobService -> Service: CompleteNormalAccountBySport(ScannedMaxId, isSuccess)
+        activate Service
+        alt isSuccess == true
+            Service -> DataAccess: CompleteNormalAccountBySport(ScannedMaxId)
+            activate DataAccess
+            DataAccess -> SQLServer: CTS_BySportNormalClassification_NormalAccount_Complete
+            activate SQLServer
+            SQLServer --> DataAccess: Updated
+            deactivate SQLServer
+            DataAccess --> Service: Completed
+            deactivate DataAccess
+        end
+        Service --> JobService: Completed
+        deactivate Service
+    end
+end
+
+JobService --> JobScheduler: Task Completed
+deactivate JobService
+
+@enduml
+

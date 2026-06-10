@@ -1,0 +1,214 @@
+@startuml Arbitrage_AssociationDetection
+!theme plain
+title Match Monitor - Arbitrage - Association Detection Logic (3 Criteria + Agent Check)
+
+start
+
+:Receive Match Staging Data;
+note right
+  Input:
+  - CTSCustIDList (all customers)
+  - AgentDetect_CTSCustIDList (Alpha/Maxbet customers)
+  - MatchID, ScoreDiff, BettypeID
+end note
+
+:Build Association Parameters;
+note right
+  DetectAssociationParamModel:
+  - CTSCustIds = CTSCustIDList
+  - AgentCTSCustIds = AgentDetect_CTSCustIDList
+  - IsDevice = true  ✅
+  - IsAI = true      ✅
+  - IsIP = true      ✅
+  
+  NOTE: Only 3 criteria (same as Hedging)
+  NOT using:
+  - 3 Matches Last 7 Days ❌
+  - IP Last 3 Days ❌
+end note
+
+partition "Criterion 1: Device Detection" {
+  :Query Device Association;
+  note right
+    SP: CTS_DC_Association_Device_Get_ByUserNameList
+    
+    Logic:
+    - Same DeviceID across customers
+    - Within time window
+    
+    Example:
+    Customer A (Alpha): DeviceID = "abc123"
+    Customer B (Maxbet): DeviceID = "abc123"
+    → ASSOCIATED ✅
+  end note
+  
+  if (Same Device found?) then (yes)
+    :Assign GroupID (Device);
+    note right
+      All customers with same DeviceID
+      get same GroupID
+    end note
+  else (no)
+    :No Device association;
+  endif
+}
+
+partition "Criterion 2: AI Detection" {
+  :Query AI Association;
+  note right
+    SP: CTS_DC_Association_AI_Get_ByUserNameList
+    
+    Logic:
+    - AI model identifies patterns
+    - Betting behavior similarity
+    - Cross-platform patterns
+    
+    Example:
+    Customer A & B have similar:
+    - Betting timing
+    - Stake patterns
+    - Match selections
+    → ASSOCIATED ✅
+  end note
+  
+  if (AI pattern found?) then (yes)
+    :Assign GroupID (AI);
+    note right
+      AI-identified associated customers
+      get same GroupID
+    end note
+  else (no)
+    :No AI association;
+  endif
+}
+
+partition "Criterion 3: IP Detection" {
+  :Query IP Association;
+  note right
+    SP: CTS_DC_Association_IP_Get_ByUserNameList
+    
+    Logic:
+    - Same IP address
+    - Within time window
+    
+    Example:
+    Customer A (Alpha): IP = "192.168.1.100"
+    Customer B (Maxbet): IP = "192.168.1.100"
+    Customer C (Maxbet): IP = "192.168.1.100"
+    → ALL ASSOCIATED ✅
+  end note
+  
+  if (Same IP found?) then (yes)
+    :Assign GroupID (IP);
+    note right
+      All customers with same IP
+      get same GroupID
+    end note
+  else (no)
+    :No IP association;
+  endif
+}
+
+:Merge All Associations;
+note right
+  Combine results from 3 criteria:
+  - Device groups
+  - AI groups
+  - IP groups
+  
+  If customer appears in multiple criteria,
+  merge into single group
+  
+  Example:
+  Device: [A, B], [C, D]
+  AI: [B, C]
+  IP: [A, E]
+  
+  → Merged: [A, B, C, D], [E]
+end note
+
+partition "Agent-Specific Detection" {
+  :Check Agent Customers;
+  note right
+    AgentDetect_CTSCustIDList contains:
+    - Alpha customers (SubscriberID = 168)
+    - Maxbet customers (SubscriberID = 169)
+    
+    These platforms often have odds differences
+    suitable for arbitrage
+  end note
+  
+  if (Contains Agent customers?) then (yes)
+    :Flag as High Priority;
+    note right
+      Arbitrage more likely between:
+      - Alpha vs Maxbet
+      - Different platforms with odds gap
+    end note
+  else (no)
+    :Normal priority;
+  endif
+}
+
+:Filter: Keep only groups with GroupID;
+note right
+  Remove customers without associations:
+  WHERE GroupID IS NOT NULL
+  
+  Only process customers who are
+  associated with others
+end note
+
+if (Has associated groups?) then (yes)
+  :Build CustGroup JSON;
+  note right
+    Format:
+    [
+      {"CustID": 12345, "GroupID": 1},
+      {"CustID": 67890, "GroupID": 1},
+      {"CustID": 11111, "GroupID": 2},
+      ...
+    ]
+  end note
+  
+  :Pass to Process Rule;
+  note right
+    Next step: CTS_DC_MatchMonitor_RuleArbitrage_Process
+    
+    Will validate:
+    - Opposite bets (different Betteam)
+    - Time-based grouping (TimeStep)
+    - Stake threshold
+  end note
+  
+  :Return: MatchProcessRuleArbitrageModel;
+else (no)
+  :No associations found;
+  :Return: null (skip this match);
+endif
+
+stop
+
+note right
+  **Key Differences from Other Rules:**
+  
+  Group Betting (5 criteria):
+  - Device, AI, IP,
+  - 3 Matches Last 7 Days,
+  - IP Last 3 Days
+  
+  Parlay (4 criteria):
+  - Device, AI, IP,
+  - 3 Matches Last 7 Days
+  
+  Hedging (3 criteria):
+  - Device, AI, IP  ← SAME AS ARBITRAGE
+  
+  Arbitrage (3 criteria):
+  - Device, AI, IP
+  - + Agent detection (Alpha/Maxbet)
+  - + Cross-platform focus
+end note
+
+@enduml
+

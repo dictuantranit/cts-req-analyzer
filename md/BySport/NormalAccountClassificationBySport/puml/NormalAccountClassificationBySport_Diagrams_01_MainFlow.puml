@@ -1,0 +1,115 @@
+@startuml NormalAccountClassificationBySport_MainFlow
+!theme plain
+title Normal Account Classification By Sport - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationBySportJobs/NormalAccountClassificationBySport
+    Parameter: batchInternalSize (default: 5000)
+end note
+
+:NormalAccountClassificationBySportJobService.Execute(batchInternalSize);
+
+:GetNormalPoolCustomers();
+note right
+    Call CTS_BySportNormalClassification_NormalPool_Get [SP]
+    Database: bodb_VR2Model (SQL Server)
+    Parameters:
+    - @ScannedMaxId (OUTPUT)
+    Logic:
+    - Get ScannedMaxId from NormalPool (MAX ID)
+    - Get LastScannedRow from Parameter table
+    - Get TOP 20000 customers from NormalPool
+    - Filter: ID <= ScannedMaxId
+    - Filter: No changes in CustomerClassification_BySport
+      (RowVersion <= LastScannedRow)
+    - Group by CustId, SportGroup
+    - Order by Priority ASC, ID ASC
+    Returns:
+    - NormalPoolCustomers (CustId, SportGroup, IsCheckBetCount)
+    - ScannedMaxId
+end note
+
+if (Has Customers?) then (yes)
+    :Chunk customers by batchInternalSize;
+    
+    :Parallel Processing (5 threads);
+    note right
+        Process chunks in parallel
+        WithDegreeOfParallelism = 5
+    end note
+    
+    repeat :For each chunk (Parallel)
+        :GetCurrentCustomerCategory(custSportList);
+        note right
+            Serialize customers to JSON
+            Call CTS_DC_CustClassification_BySport_GetCurrentCategory [SP]
+            Database: CTS_DataCenter (MySQL)
+            Parameters:
+            - @ip_CustSport (JSON)
+            Logic:
+            - Parse JSON customer list
+            - Validate customers exist
+            - Get latest normal category for each customer
+            - Check Probation LastDay status
+            Returns:
+            - CustomerCategories (CustID, SportGroup, CategoryID, IsProbationLastDay)
+        end note
+        
+        :Join NormalPoolCustomers with CustomerCategories;
+        note right
+            Join on CustID and SportGroup
+            Combine:
+            - CustID, SportGroup
+            - CategoryID (from CustomerCategory)
+            - IsProbationLastDay
+            - IsCheckBetCount (from NormalPool)
+        end note
+        
+        :ClassifyNormalPoolCustomers(customerInfosXML);
+        note right
+            Convert to XML
+            Call CTS_BySportNormalClassification_NormalPool_Classify [SP]
+            Database: bodb_VR2Model (SQL Server)
+            Parameters:
+            - @CustomersXML (XML)
+            Logic:
+            - Parse XML customer list
+            - Filter by IsCheckBetCount and CurrentCategoryId
+            - Get accumulated performance data
+            - Calculate classification rules
+            - Determine NewCategoryId based on:
+              * TurnoverRM, WinlossRM, Margin
+              * BetCount, ActiveDays
+              * CurrentCategoryId, IsProbationLastDay
+              * IsCheckBetCount, IsPlaceBetWithin30Days
+            - Update/Insert classification results
+        end note
+        
+        :ClearNormalPoolCustomers(customerInfoClearsXML, scannedMaxId);
+        note right
+            Convert to XML
+            Call CTS_BySportNormalClassification_NormalPool_Clear [SP]
+            Database: bodb_VR2Model (SQL Server)
+            Parameters:
+            - @CustomersXML (XML)
+            - @ScannedMaxId (BIGINT)
+            Logic:
+            - Parse XML customer list
+            - Delete from NormalPool
+            - WHERE ID <= ScannedMaxId
+            - AND CustId, SportGroup match
+        end note
+    repeat while (More chunks?) is (yes)
+    ->no;
+    
+    :Return true (continue);
+else (no)
+    :Return false (stop);
+endif
+
+stop
+
+@enduml
+

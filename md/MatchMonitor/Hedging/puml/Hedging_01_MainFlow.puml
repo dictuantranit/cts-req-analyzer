@@ -1,0 +1,154 @@
+@startuml Hedging_MainFlow
+!theme plain
+title Hedging Detection - Main Flow
+
+' Define colors
+!define STAGE1_COLOR #E3F2FD
+!define STAGE2_COLOR #FFF9C4
+!define STAGE3_COLOR #C8E6C9
+!define STAGE4_COLOR #FFCCBC
+!define STAGE5_COLOR #F3E5F5
+
+skinparam activity {
+    BackgroundColor<<Stage1>> STAGE1_COLOR
+    BackgroundColor<<Stage2>> STAGE2_COLOR
+    BackgroundColor<<Stage3>> STAGE3_COLOR
+    BackgroundColor<<Stage4>> STAGE4_COLOR
+    BackgroundColor<<Stage5>> STAGE5_COLOR
+}
+
+start
+
+:Job Triggered\n(Every 5 minutes)<<Stage1>>;
+
+partition "**Phase 1: Get Matches to Process**" {
+    :Call SP: CTS_DC_MatchMonitor_RuleHedging_Get<<Stage1>>;
+    
+    :Read last SequenceID\nfrom SystemParameter<<Stage1>>;
+    note right
+        Live: ParameterID = 120
+        NonLive: ParameterID = 121
+    end note
+    
+    :Read rule settings\n(TimeStep, TotalStake)<<Stage1>>;
+    note right
+        RuleGroupID = 3
+        Reason = 1
+        TimeStep = 180 seconds
+    end note
+    
+    :Load Temp_OldGroup\n(existing groups)<<Stage1>>;
+    
+    :Calculate time window\nMaxTime = MinTransDate + TimeStep<<Stage1>>;
+    
+    :Query staging table\nGROUP BY MatchID, ScoreDiff,\nBettypeID, BetID, Betteam, OldGroupID\nHAVING COUNT(DISTINCT CustID) > 1\nAND SUM(Stake) >= TotalStake<<Stage1>>;
+    
+    note right
+        **Special Fields:**
+        - AgentDetect_CTSCustIDList
+          (Alpha/Maxbet agents)
+    end note
+    
+    :Return match groups<<Stage1>>;
+}
+
+if (Has matches to process?) then (yes)
+    partition "**Phase 2: Process Each Match (2-Level Parallel)**" {
+        fork
+            :Match 1<<Stage2>>;
+        fork again
+            :Match 2<<Stage2>>;
+        fork again
+            :Match N<<Stage2>>;
+        end fork
+        
+        note right
+            **External Parallelism**
+            Number of matches processed in parallel
+        end note
+        
+        partition "**Internal Parallel Processing**" {
+            fork
+                :Group 1<<Stage2>>;
+            fork again
+                :Group 2<<Stage2>>;
+            fork again
+                :Group M<<Stage2>>;
+            end fork
+            
+            note right
+                **Internal Parallelism**
+                Number of groups per match
+            end note
+        }
+        
+        :Round 1: Association Detection\n(3 criteria: Device, AI, IP)<<Stage2>>;
+        
+        :Call SP: CTS_DC_MatchMonitor_RuleHedging_Process\nwith CustGroup JSON<<Stage2>>;
+        
+        :Inside Process SP:<<Stage2>>;
+        
+        :Group tickets by TimeStep windows\n(180 seconds)<<Stage2>>;
+        
+        :Calculate IsValidGroup:\nCOUNT(DISTINCT CustID) > 1\nAND SUM(Stake) >= TotalStake<<Stage2>>;
+        
+        :Create Temp_Completed table<<Stage2>>;
+        
+        partition "**IsHedging Check Loop**" {
+            :For each GroupID:<<Stage2>>;
+            
+            :Get customers in group<<Stage2>>;
+            
+            :Check latest customer classification\n(IsHedgingReasonMM flag)<<Stage2>>;
+            
+            if (Customer has IsHedgingReasonMM?) then (yes)
+                :Set IsHedging = TRUE<<Stage2>>;
+            else (no)
+                :Call SP:\nCTS_DC_Association_IsAssociatedHedgingCustByCustIDList<<Stage2>>;
+                
+                if (Associated hedging?) then (yes)
+                    :Set IsHedging = TRUE<<Stage2>>;
+                else (no)
+                    :Set IsHedging = FALSE<<Stage2>>;
+                endif
+            endif
+            
+            :Update Temp_Completed<<Stage2>>;
+        }
+        
+        :Return complete groups\n(with IsHedging flag)<<Stage2>>;
+        
+        :Round 2: Reprocess unassigned\n(GroupID = 0)<<Stage2>>;
+    }
+    
+    partition "**Phase 3: Complete & Save**" {
+        :Merge groups by TransIDList<<Stage3>>;
+        
+        if (Match exists in MatchMonitorDetails?) then (yes)
+            :Merge new tickets\nwith existing tickets (UNION)<<Stage3>>;
+            :UPDATE MatchMonitorDetails<<Stage3>>;
+        else (no)
+            :INSERT MatchMonitor<<Stage3>>;
+            :INSERT MatchMonitorDetails<<Stage3>>;
+        endif
+        
+        :UPDATE staging table\nSET GroupID for detected tickets<<Stage3>>;
+    }
+    
+    partition "**Phase 4: Clean Staging**" {
+        :Call SP: CTS_DC_MatchMonitor_RuleHedging_StagingClean<<Stage4>>;
+        
+        :DELETE FROM staging table\nWHERE SequenceID <= MaxSequenceID<<Stage4>>;
+        
+        :UPDATE SystemParameter\nSET ParameterValue = MaxSequenceID<<Stage4>>;
+    }
+else (no)
+    :No matches to process<<Stage5>>;
+endif
+
+:Job completed<<Stage5>>;
+
+stop
+
+@enduml
+

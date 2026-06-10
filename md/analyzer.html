@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CTS Requirement Analyzer</title>
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <link rel="stylesheet" href="assets/css/analyzer.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 CTS Requirement Analyzer</h1>
+            <p>Analyze requirements against technical documentation using AI</p>
+        </div>
+
+        <div class="analyzer-container">
+            <div class="back-nav">
+                <button class="back-button" onclick="window.location.href='idxanalyze.html'">
+                    ← Back to Home
+                </button>
+            </div>
+
+            <!-- Reindex Section -->
+            <div class="reindex-card">
+                <div class="reindex-header">
+                    <div>
+                        <h3>🔄 Vector Database Status</h3>
+                        <p id="indexStatus" class="index-status">Checking status...</p>
+                    </div>
+                    <button id="reindexBtn" class="reindex-button">
+                        🔄 Rebuild Index
+                    </button>
+                </div>
+                <p class="reindex-info">
+                    ℹ️ The vector database must be initialized before analyzing requirements.
+                    Click "Rebuild Index" to scan and index all documentation files.
+                </p>
+            </div>
+
+            <div class="analyzer-card">
+                <h2>📝 Enter Your Requirement</h2>
+                <textarea id="requirementInput" class="requirement-input"
+                    placeholder="Example: Add a new filter to show only high-risk matches..." rows="6"></textarea>
+
+                <div class="analyzer-controls">
+                    <label for="contextCount">Number of context documents:</label>
+                    <input type="number" id="contextCount" value="5" min="1" max="20">
+
+                    <button id="analyzeBtn" class="analyze-action-button">
+                        🔍 Analyze Requirement
+                    </button>
+                </div>
+            </div>
+
+            <div id="resultContainer" class="result-container" style="display: none;">
+                <div class="result-card">
+                    <h2>📊 Analysis Result</h2>
+                    <div id="analysisContent" class="analysis-content">
+                        <!-- Analysis result will be displayed here -->
+                    </div>
+
+                    <div class="sources-section">
+                        <h3>📁 Relevant Sources</h3>
+                        <div id="sourcesList" class="sources-list">
+                            <!-- Sources will be listed here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+                <div class="spinner"></div>
+                <p>Analyzing your requirement...</p>
+            </div>
+
+            <div id="errorContainer" class="error-container" style="display: none;">
+                <div class="error-card">
+                    <h3>❌ Error</h3>
+                    <p id="errorMessage"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/analyzer.js"></script>
+</body>
+
+</html>

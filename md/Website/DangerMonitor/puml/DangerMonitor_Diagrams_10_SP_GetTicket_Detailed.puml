@@ -1,0 +1,242 @@
+@startuml DangerMonitor_SP_GetTicket_Detailed
+!theme plain
+title CTS_MatchMonitor_Details_GetTicket - Detailed Database Flow
+
+skinparam component {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+skinparam arrow {
+    Color darkgreen
+}
+
+package "SQL Server Database: bodb02 / bodb_Archive" {
+    database "bettrans" as BetTrans
+    database "bettrans14" as BetTrans14
+    database "bettrans_bk" as BetTransBK
+    database "Match" as Match
+    database "match14" as Match14
+    database "match_bk" as MatchBK
+    database "Customer" as Customer
+    database "custInfo" as CustInfo
+    database "Exchange" as Exchange
+    database "Dep_CustSuper" as DepCustSuper
+    database "CustProductStatus" as CustProductStatus
+    database "league" as League
+}
+
+component "CTS_MatchMonitor_Details_GetTicket" as SP {
+    note right
+        **Database:** bodb02 / bodb_Archive
+        **Purpose:** Get Ticket Details for Detail Page
+        **QueryType:**
+        - 1: Service (by LastScannedSequenceID, IsLive, BatchSize)
+        - 2: Report - Last 3 Days (by EventDate, ListTransId)
+        - 3: Report - Last 7 Days (by EventDate, ListTransId)
+        **ViewMode:**
+        - 0: All-MatchMonitor
+        - 1: Suspicious Only
+    end note
+}
+
+' Temp Tables
+package "Temp Tables (Internal)" {
+    component "#tmpTickets" as TmpTickets
+    component "#tmpTransIds" as TmpTransIds
+    component "#tmpSportBetType" as TmpSportBettype
+    component "#tmpUsername" as TmpUsername
+    component "#tmpCustomer" as TmpCustomer
+    component "#tmpTransIdReason" as TmpTransIdReason
+    component "@tmpBUMBData" as TmpBUMBData
+}
+
+note right of TmpTickets
+    **Temp Table: #tmpTickets**
+    * SequenceId, TransId, TransDate
+    * MatchId, EventDate, EventStatus, KickOffTime
+    * HomeId, AwayId, LeagueId, LeagueName
+    * SportType, BetType, CustId
+    * BetTeam, BetChoiceHome, BetChoiceAway, BetId
+    * Stake, OrgStake, Odds, MalayOdds, OddsType
+    * Hdp1, Hdp2, Hdp, LiveHomeScore, LiveAwayScore
+    * TicketStatus, LiveIndicator
+    * CurrencyId, CurrencyName
+    * IsLicensee, CustomerClass
+    * Danger1-5 : TINYINT
+    * Reason, ListReason, AGroup, MGroup
+    * BetFrom, IsCashout
+end note
+
+note right of TmpTransIds
+    **Temp Table: #tmpTransIds**
+    * TransId : BIGINT
+    * Reason : VARCHAR(50)
+    * AGroup : INT
+    * MGroup : INT
+end note
+
+note right of TmpSportBettype
+    **Temp Table: #tmpSportBetType**
+    * SportTypeID : SMALLINT
+    * BetTypeID : INT
+    * BetChoiceType : TINYINT
+    * BetChoiceHome, BetChoiceAway : NVARCHAR(10)
+    * BetIDPattern : NVARCHAR(20)
+    * BetID : BIGINT
+end note
+
+' Flow: Parse Input Parameters
+SP --> TmpBUMBData : **EXEC**\nAge_SelBalanceUpDay
+SP --> TmpBUMBData : **SELECT**\nGet BalanceUpDay, MoveBetsDay
+
+SP --> TmpUsername : **INSERT**\n(Parse @UserNameList)
+SP --> TmpCustomer : **INSERT**\n(Filter Customers by Username)
+
+SP --> TmpSportBettype : **INSERT**\n(Parse @ListSportBetType JSON)
+
+SP --> TmpTransIds : **INSERT**\n(Parse @ListTransId JSON)
+
+' Flow: Determine Data Source
+SP --> SP : Check EventDate vs\nBalanceUpDay/MoveBetsDay
+note right of SP
+    **Data Source Logic:**
+    - EventDate < BalanceUpDay → Use bettrans_bk
+    - EventDate <= MoveBetsDay → Use bettrans14
+    - Otherwise → Use bettrans (Origin)
+end note
+
+' Flow: QueryType = 2 (Last 3 Days)
+SP --> TmpTickets : **INSERT**\n(QueryType = 2)
+TmpTransIds --> BetTrans : **JOIN**\nON TransId
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans : **JOIN**\nON SportType, BetType, BetID
+
+note right of BetTrans
+    **SELECT Operations (QueryType=2):**
+    - Filter by @MatchID
+    - Filter by @IsLive
+    - Filter by @IsExclTestCurr
+    - Filter by @FromTransDate, @ToTransDate
+    - Filter by @UserNameList
+    - FROM bettrans (Origin)
+    - FROM bettrans14 (14 days)
+    - FROM bettrans_bk (Archive)
+    - WITH(NOLOCK)
+end note
+
+' Flow: QueryType = 3 (Last 7 Days)
+SP --> TmpTickets : **INSERT**\n(QueryType = 3)
+TmpTransIds --> BetTrans14 : **JOIN**\nON TransId
+BetTrans14 --> Match14 : **JOIN**\nON MatchId
+BetTrans14 --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans14 : **JOIN**\nON SportType, BetType, BetID
+
+' Flow: QueryType = 1 (Service)
+SP --> TmpTickets : **INSERT**\n(QueryType = 1)
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> League : **JOIN**\nON LeagueId
+BetTrans --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans : **JOIN**\nON SportType, BetType, BetID
+
+note right of BetTrans
+    **SELECT Operations (QueryType=1):**
+    - Filter by @LastScannedSequenceID
+    - Filter by @MatchID
+    - Filter by @IsLive
+    - Filter by @BatchSize
+    - ORDER BY sequenceid DESC
+end note
+
+' Flow: ViewMode = 0 (All-MatchMonitor)
+SP --> TmpTickets : **INSERT**\n(ViewMode = 0)
+BetTrans --> Customer : **JOIN**\nON CustId
+
+note right of Customer
+    **Filter Conditions (ViewMode=0):**
+    - Exclude sites: Nextbet, 9wickets, 9wsports
+    - Exclude username LIKE '%Cashout%'
+    - Exclude specific mrecommend IDs
+    - Exclude specific recommend IDs
+    - Exclude specific srecommend IDs
+end note
+
+' Flow: Enrich Data with Customer Info
+TmpTickets --> CustInfo : **JOIN**\nON CustId
+CustInfo --> DepCustSuper : **JOIN**\nON srecommend
+CustInfo --> CustProductStatus : **JOIN**\nON CustId
+
+SP --> TmpTickets : **UPDATE**\n(Enrich with Customer Data)
+note right of SP
+    **UPDATE Operations:**
+    - Set IsLicensee (from Dep_CustSuper)
+    - Set Danger1-5 (from custInfo)
+    - Set CustomerClass (from custInfo)
+end note
+
+' Flow: Update Malay Odds
+SP --> TmpTickets : **UPDATE**\n(Convert to MalayOdds)
+note right of SP
+    **MalayOdds Conversion:**
+    - Decimal Odds (Type 1)
+    - Hong Kong Odds (Type 2)
+    - Indonesia Odds (Type 3)
+    - Malaysian & Myanmar (Type 4, 6)
+    - US Odds (Type 5)
+end note
+
+' Flow: Apply Filters
+SP --> TmpTickets : **DELETE**\n(Apply Filters)
+note right of SP
+    **Filter Operations:**
+    - Filter by @ListScore (LiveHomeScore, LiveAwayScore)
+    - Filter by @IsLicensee
+    - Filter by @ListCustomerClass
+    - Filter by @ListDanger (JSON: Danger1-5)
+    - Filter by @ListCurrency
+    - Filter by @ListReason
+    - Filter by @ListAGroup, @ListMGroup
+    - Filter by @ListHDPBetTeam
+    - Filter by @ListStatus
+    - Filter by @CustAmountRM (Sum by BetChoice)
+    - Filter by @IsCashout
+end note
+
+' Flow: Filter by Reason (Complex)
+SP --> TmpTransIdReason : **CREATE**\n(For Multi-Reason)
+SP --> TmpTransIdReason : **INSERT**\n(Group by TransId)
+SP --> TmpTickets : **UPDATE**\n(Set ListReason, Reason)
+SP --> TmpTickets : **DELETE**\n(Filter by Reason)
+
+' Flow: Filter by CustAmountRM
+SP --> TmpTickets : **SELECT**\n(Sum Stake by CustId, CurrencyId, BetTeam)
+SP --> TmpTickets : **DELETE**\n(Filter by @CustAmountRM)
+
+' Flow: Return Ticket Details
+SP --> TmpTickets : **SELECT**
+note right of SP
+    **Returns:**
+    - All ticket columns
+    - MalayOdds (converted)
+    - Enriched customer data
+    - Filtered results
+    **Output Parameters:**
+    - @MinSequenceId
+    - @MinTransDate
+    - @TotalTicket
+end note
+
+' Cleanup
+SP --> TmpTickets : **DROP TABLE**
+SP --> TmpTransIds : **DROP TABLE**
+SP --> TmpSportBettype : **DROP TABLE**
+SP --> TmpTransIdReason : **DROP TABLE**
+
+@enduml
+

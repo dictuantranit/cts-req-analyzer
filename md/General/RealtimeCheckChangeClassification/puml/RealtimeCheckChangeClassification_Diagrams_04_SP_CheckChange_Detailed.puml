@@ -1,0 +1,122 @@
+@startuml RealtimeCheckChangeClassification_SP_CheckChange_Detailed
+!theme plain
+title Stored Procedure: CTS_NormalClassification_RealTime_CheckChanges - Detailed Flow
+
+card "**SP: CTS_NormalClassification_RealTime_CheckChanges**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300-600 seconds" as Timeout
+}
+
+start
+
+partition "Input/Output Parameters" {
+  :Declare OUTPUT parameters;
+  note right
+      @NextScannedDateTime1 DATETIME OUTPUT
+      @NextScannedDateTime2 DATETIME OUTPUT
+      @NextScannedDateTime3 DATETIME OUTPUT
+      @NextScannedDateTime4 DATETIME OUTPUT
+      
+      Purpose: Track next scan time slots
+      for optimization (sliding window/parallel)
+  end note
+}
+
+partition "Detect Transaction Changes" {
+  :Query changes from tracking table;
+  note right
+      Possible logic:
+      - Check transaction log/audit table
+      - Compare LastTicketDate with previous scan
+      - Use change data capture (CDC)
+      - Query betting transaction tables
+  end note
+  
+  :Separate Member vs Agency customers;
+  note right
+      Business Rule:
+      - Member: Regular customers
+      - Agency: Agency-level customers
+      
+      Criteria might be:
+      - Customer type field
+      - Role/Permission level
+      - Specific customer categories
+  end note
+}
+
+partition "Calculate Next Scan Times" {
+  :Calculate 4 next scan time slots;
+  note right
+      Possible strategies:
+      
+      **Strategy 1: Sliding Window**
+      - Slot1: Current + 5 min
+      - Slot2: Current + 10 min
+      - Slot3: Current + 15 min
+      - Slot4: Current + 20 min
+      
+      **Strategy 2: Time-based**
+      - Slot1: Next 00:00:00
+      - Slot2: Next 06:00:00
+      - Slot3: Next 12:00:00
+      - Slot4: Next 18:00:00
+      
+      **Strategy 3: Load-based**
+      - Distribute based on customer count
+      - Balance database load
+  end note
+  
+  :Set OUTPUT parameters;
+  :@NextScannedDateTime1 = calculated_time1;
+  :@NextScannedDateTime2 = calculated_time2;
+  :@NextScannedDateTime3 = calculated_time3;
+  :@NextScannedDateTime4 = calculated_time4;
+}
+
+partition "Return Result Sets" {
+  :Prepare ResultSet 1 - Member Customers;
+  note right
+      SELECT 
+        CustId,
+        LastTicketDate
+      FROM [tracking_table]
+      WHERE CustomerType = 'Member'
+        AND HasChanges = 1
+      
+      Purpose: Update Archive DB
+  end note
+  
+  :Prepare ResultSet 2 - Agency Customers;
+  note right
+      SELECT 
+        CustId,
+        LastTicketDate
+      FROM [tracking_table]
+      WHERE CustomerType = 'Agency'
+        AND HasChanges = 1
+      
+      Purpose: Update Archive DB
+  end note
+  
+  :Return 2 ResultSets + 4 OUTPUT parameters;
+}
+
+note right
+  **Key Logic**:
+  1. Detect transaction changes for customers
+  2. Separate Member and Agency for different processing
+  3. Calculate 4 next scan time slots for optimization
+  4. Return customer lists with LastTicketDate
+  
+  **Tables Accessed** (Likely):
+  - CustomerTransactionLog
+  - TicketHistory
+  - CustomerAssociationChanges
+  - SystemParameter (for last scan time)
+end note
+
+stop
+
+@enduml
+

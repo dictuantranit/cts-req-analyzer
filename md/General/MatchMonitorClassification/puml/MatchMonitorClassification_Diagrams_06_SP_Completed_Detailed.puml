@@ -1,0 +1,257 @@
+@startuml MatchMonitorClassification_SP_Completed
+title CTS_DC_CustClassification_MatchMonitor_Completed - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #F57C00
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+
+start
+:SP: **CTS_DC_CustClassification_MatchMonitor_Completed**;
+note right
+  **Database**: CTS_DataCenter.ctsServiceAdmin
+  **Purpose**: Mark match and tickets as processed
+  **Called by**: ClassifyMatchMonitor Job (after classification)
+  **Transaction**: Auto-commit or explicit transaction
+end note
+
+partition "Input Parameters" {
+  :Receive Parameters;
+  note right
+    **@ip_MatchID** (INT)
+    - Match that was just processed
+    - Must be valid MatchID
+    - Cannot be NULL
+    
+    **@ip_MMDetailsIDList** (VARCHAR/TEXT)
+    - Comma-separated fraud ticket IDs
+    - Example: "12345,67890,11111"
+    - Can be empty if no fraud detected
+  end note
+}
+
+partition "Parse Ticket ID List" {
+  if (@ip_MMDetailsIDList IS NOT NULL AND @ip_MMDetailsIDList != ''?) then (yes)
+    :Create Temp Table;
+    note right
+      **Temp Table**:
+      ```sql
+      CREATE TEMPORARY TABLE #TempTicketIDs (
+        DetailID INT
+      )
+      ```
+    end note
+    
+    :Parse Comma-Separated IDs;
+    note right
+      **String Split Logic**:
+      ```sql
+      -- MySQL 8.0+
+      INSERT INTO #TempTicketIDs (DetailID)
+      SELECT CAST(value AS UNSIGNED) as DetailID
+      FROM JSON_TABLE(
+        CONCAT('["', 
+          REPLACE(@ip_MMDetailsIDList, ',', '","'), 
+        '"]'),
+        '$[*]' COLUMNS(value VARCHAR(50) PATH '$')
+      ) AS jt
+      WHERE value REGEXP '^[0-9]+$'
+      
+      -- Alternative for older MySQL
+      -- Use FIND_IN_SET or custom split function
+      ```
+      
+      **Example**:
+      Input: "12345,67890,11111"
+      Result: 3 rows in #TempTicketIDs
+    end note
+  endif
+}
+
+partition "Update Ticket Status" {
+  if (Has Ticket IDs?) then (yes)
+    :Mark Tickets as Processed;
+    note right
+      **Update Fraud Tickets**:
+      ```sql
+      UPDATE CTSMatchMonitorDetail
+      SET 
+        IsProcessed = 1,
+        ProcessedDate = NOW(),
+        IsFraud = 1,
+        FraudDetectedDate = NOW()
+      WHERE ID IN (SELECT DetailID FROM #TempTicketIDs)
+        AND MatchID = @ip_MatchID
+        AND IsProcessed = 0  -- Only update unprocessed
+      ```
+      
+      **Fields Updated**:
+      - IsProcessed = 1 (mark as done)
+      - ProcessedDate (timestamp)
+      - IsFraud = 1 (confirmed fraud)
+      - FraudDetectedDate (detection time)
+      
+      **Purpose**:
+      - Remove from processing queue
+      - Track fraud tickets
+      - Audit trail
+      - Prevent reprocessing
+    end note
+    
+    :Check Affected Rows;
+    note right
+      **Validation**:
+      ```sql
+      SELECT @AffectedRows = ROW_COUNT()
+      ```
+      
+      **Log if mismatch**:
+      - Expected: Count of IDs in list
+      - Actual: @AffectedRows
+      - Could indicate:
+        * Already processed tickets
+        * Invalid ticket IDs
+        * MatchID mismatch
+    end note
+  endif
+}
+
+partition "Update Match Status" {
+  :Check All Tickets Processed;
+  note right
+    **Verify Match Completion**:
+    ```sql
+    SELECT @UnprocessedCount = COUNT(*)
+    FROM CTSMatchMonitorDetail
+    WHERE MatchID = @ip_MatchID
+      AND (IsProcessed = 0 OR IsProcessed IS NULL)
+    ```
+    
+    **If @UnprocessedCount = 0**:
+    - All tickets processed
+    - Match can be marked complete
+    
+    **If @UnprocessedCount > 0**:
+    - Some tickets still pending
+    - Keep match in queue
+    - Will be reprocessed
+  end note
+  
+  if (@UnprocessedCount = 0?) then (yes)
+    :Mark Match as Completed;
+    note right
+      **Complete Match**:
+      ```sql
+      UPDATE CTSMatchMonitor
+      SET 
+        IsCompleted = 1,
+        IsProcessing = 0,
+        CompletedDate = NOW(),
+        ProcessEndTime = NOW(),
+        TotalFraudTickets = (
+          SELECT COUNT(*)
+          FROM CTSMatchMonitorDetail
+          WHERE MatchID = @ip_MatchID
+            AND IsFraud = 1
+        )
+      WHERE MatchID = @ip_MatchID
+      ```
+      
+      **Fields Updated**:
+      - IsCompleted = 1 (fully done)
+      - IsProcessing = 0 (unlock)
+      - CompletedDate (finish timestamp)
+      - ProcessEndTime (duration tracking)
+      - TotalFraudTickets (summary count)
+      
+      **Purpose**:
+      - Remove from queue permanently
+      - Unlock for reporting
+      - Complete audit trail
+      - Performance metrics
+    end note
+  else (no)
+    :Keep Match in Queue;
+    note right
+      **Partial Completion**:
+      ```sql
+      UPDATE CTSMatchMonitor
+      SET 
+        IsProcessing = 0,
+        LastPartialProcessDate = NOW()
+      WHERE MatchID = @ip_MatchID
+      ```
+      
+      **Reason**:
+      - Some tickets not yet flagged
+      - Needs reprocessing
+      - Detection rules evolving
+      - Data still being collected
+      
+      **Next Run**:
+      - Will pick this match again
+      - Process remaining tickets
+      - Eventually mark complete
+    end note
+  endif
+}
+
+partition "Cleanup" {
+  :Drop Temp Tables;
+  note right
+    **Cleanup**:
+    ```sql
+    DROP TEMPORARY TABLE IF EXISTS #TempTicketIDs
+    ```
+    
+    **Memory Management**:
+    - Free temp table memory
+    - Clean session resources
+  end note
+}
+
+:Complete;
+
+note right
+  **Key Characteristics**:
+  
+  **Atomic Operation**:
+  - All updates in one transaction
+  - Rollback on error
+  - Consistency guaranteed
+  
+  **Idempotent**:
+  - Can be called multiple times
+  - Already processed tickets skipped
+  - No side effects on re-run
+  
+  **Queue Management**:
+  - Removes completed matches
+  - Keeps partial matches in queue
+  - FIFO order maintained
+  
+  **Performance**:
+  - Indexed on MatchID, IsProcessed
+  - Bulk update for tickets
+  - Single match update
+  - Fast execution
+  
+  **Error Handling**:
+  - Invalid MatchID: No rows affected
+  - Invalid ticket IDs: Logged
+  - Constraint violations: Rollback
+  - Timeout: Automatic retry
+  
+  **Related Operations**:
+  - Called after classification complete
+  - Updates detection results
+  - Maintains processing queue
+  - Enables reporting
+end note
+
+stop
+
+@enduml
+

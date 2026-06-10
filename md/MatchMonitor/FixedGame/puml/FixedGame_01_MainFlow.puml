@@ -1,0 +1,105 @@
+@startuml FixedGame_MainFlow
+!theme plain
+title Fixed Game Detection - Main Flow
+
+' Define colors
+!define STAGE1_COLOR #E3F2FD
+!define STAGE2_COLOR #FFF9C4
+!define STAGE3_COLOR #C8E6C9
+!define STAGE4_COLOR #FFCCBC
+
+skinparam activity {
+    BackgroundColor<<Stage1>> STAGE1_COLOR
+    BackgroundColor<<Stage2>> STAGE2_COLOR
+    BackgroundColor<<Stage3>> STAGE3_COLOR
+    BackgroundColor<<Stage4>> STAGE4_COLOR
+}
+
+start
+
+:Job Triggered\n(Every 5 minutes)<<Stage1>>;
+
+partition "**Phase 1: Get Matches**" {
+    :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_Get<<Stage1>>;
+    
+    :Read last SequenceID\nfrom SystemParameter<<Stage1>>;
+    note right
+        Live: ParameterID = 100
+        NonLive: ParameterID = 101
+    end note
+    
+    :Get batch size\nfrom SystemParameter<<Stage1>>;
+    note right
+        Live: ParameterID = 126
+        NonLive: ParameterID = 127
+    end note
+    
+    :Query staging table\nMatchMonitorStagingFixedGame[Live/NonLive]<<Stage1>>;
+    
+    :Group by: MatchID, ScoreDiff\nBettypeID, BetID, HDP, Betteam<<Stage1>>;
+    
+    :Return distinct match keys\nand MaxSequenceID<<Stage1>>;
+}
+
+if (Has matches to process?) then (yes)
+    partition "**Phase 2: Process Each Match (Parallel)**" {
+        fork
+            :Match 1<<Stage2>>;
+            :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_Process<<Stage2>>;
+            :Detect suspicious patterns<<Stage2>>;
+        fork again
+            :Match 2<<Stage2>>;
+            :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_Process<<Stage2>>;
+            :Detect suspicious patterns<<Stage2>>;
+        fork again
+            :Match N<<Stage2>>;
+            :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_Process<<Stage2>>;
+            :Detect suspicious patterns<<Stage2>>;
+        end fork
+        
+        note right
+            **Processing in parallel**
+            - Number of threads: Configurable
+            - Each match processed independently
+        end note
+    }
+    
+    partition "**Phase 3: Complete & Save**" {
+        :For each detected match<<Stage3>>;
+        
+        if (Match has detected tickets?) then (yes)
+            :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_Complete<<Stage3>>;
+            
+            if (Match exists in MatchMonitorDetails?) then (yes)
+                :Merge new tickets\nwith existing tickets<<Stage3>>;
+            else (no)
+                :Insert new record<<Stage3>>;
+            endif
+            
+            :Update MatchMonitor table<<Stage3>>;
+            :Update MatchMonitorDetails table<<Stage3>>;
+        else (no)
+            :Skip match<<Stage3>>;
+        endif
+    }
+    
+    partition "**Phase 4: Clean Staging**" {
+        :Call SP: CTS_DC_MatchMonitor_RuleFixedGame_StagingClean<<Stage4>>;
+        
+        :Delete processed tickets\nfrom staging table<<Stage4>>;
+        note right
+            DELETE WHERE SequenceID <= MaxSequenceID
+        end note
+        
+        :Update SystemParameter\nwith new LastSequenceID<<Stage4>>;
+    }
+else (no)
+    :No matches to process<<Stage4>>;
+endif
+
+:Job completed<<Stage4>>;
+
+stop
+
+@enduml
+

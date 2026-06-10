@@ -1,0 +1,200 @@
+@startuml MatchMonitorClassificationBySport_Sequence
+!theme plain
+title Match Monitor Classification By Sport - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationBySportJob\nController" as Controller
+participant "MatchMonitorClassificationBySport\nJobService" as JobService
+participant "MatchMonitorClassificationBySport\nService" as Service
+participant "MatchMonitorClassificationBySport\nDataAccess" as DataAccess
+participant "ProblemAccountBySport\nService" as PAService
+participant "ProblemAccountBySport\nDataAccess" as PADataAccess
+participant "BaseCustomerClassificationBySport\nDataAccess" as BaseDataAccess
+participant "CustClassToMainDB\nService" as MainDBService
+database "MySQL\nCTS_DataCenter" as DB
+database "Main Database\n(SQL Server)" as MainDB
+
+Scheduler -> Controller: POST /api/classificationBySportJobs/ClassifyMatchMonitorBySport\nbatchSize
+activate Controller
+
+Controller -> JobService: Execute(batchSize)
+activate JobService
+
+JobService -> Service: ClassifyMatchMonitor(batchSize)
+activate Service
+
+Service -> DataAccess: ClassifyMatchMonitor(batchSize)
+activate DataAccess
+
+DataAccess -> DataAccess: Create ClassifyMatchMonitorBySportCriteria\nSet BatchSize
+DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_MatchMonitor_Classify\n@ip_BatchSize
+activate DB
+note right of DB
+    Stored Procedure:
+    - Get MatchID from SystemParameter (ID=199)
+    - If MatchID=0: Get first unclassified match
+    - Determine SportGroup (145 for Saba Soccer)
+    - Get customers from MatchMonitorDetails
+    - Filter: Exclude existing PA categories
+    - Return: CustInfos, MMDetailIDList, MatchID
+end note
+DB --> DataAccess: ResultSet: CustInfos, MMDetailIDList, MatchID
+deactivate DB
+
+DataAccess --> Service: ClassifyGBMatchMonitorBySportModel
+deactivate DataAccess
+
+Service --> JobService: ClassifyGBMatchMonitorBySportModel
+deactivate Service
+
+alt Has Customers (CustInfos.IsNotNullOrEmpty())
+    JobService -> JobService: Convert to InsertProblemAccountBySportEntity[]
+    note right of JobService
+        Map from ClassifyGBMMCustInfosBySportEntity:
+        - CTSCustID, CustID, RoleID
+        - SportGroup, SubscriberID
+        - CategoryID, CategoryGroupID
+        - IsLicensee, MatchID
+        - CreatedBy = StarixITId
+        - Remark = MatchID.ToString()
+    end note
+    
+    JobService -> Service: InsertProblemAccount(paBySports, paras)
+    activate Service
+    
+    Service -> PAService: InsertProblemAccountBySport(paBySports, CCInputFlow.BySportInsertPA, BySport_FunctionId.ClassifyGBMatchMonitor)
+    activate PAService
+    
+    PAService -> PAService: CombinePAWithLosingPerformance()
+    note right of PAService
+        Extract CustID and SportGroup
+        Get losing performance data
+    end note
+    
+    PAService -> PAService: GetPALosingBySport(custInfos, functionId)
+    PAService -> PADataAccess: GetPALosingBySport(custInfosJson, functionId)
+    activate PADataAccess
+    
+    PADataAccess -> DB: EXEC CTS_ProblemAccountsClassification_BySport_Daily\n@ip_CustJson, @ip_FunctionId
+    activate DB
+    note right of DB
+        Get losing performance:
+        - BetCount, ActiveDays
+        - TurnoverRM, WinlossRM
+        - WinlossStatus
+        - PerformanceTime
+    end note
+    DB --> PADataAccess: ProblemAccountLosingBySportEntity[]
+    deactivate DB
+    
+    PADataAccess --> PAService: ProblemAccountLosingBySportEntity[]
+    deactivate PADataAccess
+    
+    PAService -> PAService: MergePALosingClassification()
+    note right of PAService
+        Join PA data with losing performance
+        by CustID + SportGroup
+    end note
+    
+    PAService -> PAService: Create InsertCustomerClassificationBySportModel\nSerialize to JSON
+    PAService -> BaseDataAccess: InsertCustomerClassificationBySport(CCInputFlow.BySportInsertPA, model)
+    activate BaseDataAccess
+    
+    BaseDataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_Insert\n@ip_InputFlowID=335, @ip_CustInfo (JSON)
+    activate DB
+    note right of DB
+        Stored Procedure Flow:
+        1. Insert_GetInfo - Parse JSON, validate
+        2. Insert_Process - Process classification logic
+        3. Insert_Complete - Complete insertion
+        Returns: InsertPABySportResultModel[]
+    end note
+    DB --> BaseDataAccess: ResultSet: CustID, SportGroup, CustomerClass
+    deactivate DB
+    
+    BaseDataAccess --> PAService: ResultInsertClassificationBySportModel
+    deactivate BaseDataAccess
+    
+    PAService --> Service: InsertPABySportResultModel[]
+    deactivate PAService
+    
+    Service -> MainDBService: PushCCBySportToMainDB(paCustBySports, serviceName, batchExternalSize)
+    activate MainDBService
+    
+    MainDBService -> MainDBService: Chunk customers by batchExternalSize
+    MainDBService -> MainDBService: GetCustomerClassificationBySports(custs)
+    MainDBService -> MainDB: SELECT CustomerClassification_BySport\nWHERE CustID IN (...) AND SportID IN (...)
+    activate MainDB
+    MainDB --> MainDBService: GetCustomerClassificationBySportEntity[]
+    deactivate MainDB
+    
+    MainDBService -> MainDBService: RetryPushCCBySportToMainDB(ccBySports, retryTime=3, serviceName)
+    loop Retry up to 3 times
+        MainDBService -> MainDB: EXEC UpdateCustomerClassificationBySport\n@CustClassification (JSON)
+        activate MainDB
+        note right of MainDB
+            Update Main Database
+            Customer Classification By Sport
+        end note
+        MainDB --> MainDBService: Result (ErrorCode, ErrorMsg)
+        deactivate MainDB
+        
+        alt Success (ErrorCode = 0)
+            MainDBService -> MainDBService: Break loop
+        else Failure (ErrorCode != 0)
+            MainDBService -> MainDBService: Retry
+        end
+    end
+    
+    MainDBService --> Service: bool (success)
+    deactivate MainDBService
+    
+    Service --> JobService: bool (success)
+    deactivate Service
+    
+    JobService -> Service: ClassifyCompletedMatchMonitor(classifyGBMMModel)
+    activate Service
+    
+    Service -> DataAccess: ClassifyCompletedMatchMonitor(matchID, mmDetailIDs)
+    activate DataAccess
+    
+    DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_MatchMonitor_Completed\n@ip_MatchID, @ip_MMDetailsIDList
+    activate DB
+    note right of DB
+        Update:
+        - MatchMonitorDetails.ClassifyStatusBySport = 1
+        - If no MMDetailsIDList: Update MatchMonitor
+        - Reset SystemParameter.ParameterValue = 0
+    end note
+    DB --> DataAccess: Success
+    deactivate DB
+    
+    DataAccess --> Service: void
+    deactivate DataAccess
+    
+    Service --> JobService: void
+    deactivate Service
+else No Customers
+    JobService -> JobService: Skip InsertProblemAccount
+    JobService -> Service: ClassifyCompletedMatchMonitor(classifyGBMMModel)
+    activate Service
+    Service -> DataAccess: ClassifyCompletedMatchMonitor(matchID, null)
+    activate DataAccess
+    DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_MatchMonitor_Completed\n@ip_MatchID, @ip_MMDetailsIDList=NULL
+    activate DB
+    DB --> DataAccess: Success
+    deactivate DB
+    DataAccess --> Service: void
+    deactivate DataAccess
+    Service --> JobService: void
+    deactivate Service
+end
+
+JobService --> Controller: Task<bool> (true/false)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true/false }
+deactivate Controller
+
+@enduml
+

@@ -1,0 +1,236 @@
+@startuml Parlay_Sequence
+!theme plain
+title Parlay Group Betting Detection - Sequence Diagram
+
+actor "Background Job" as Job
+participant "MatchMonitorParlayJobService" as JobService
+participant "MMParlayStaging\nService" as StagingService
+participant "MMParlayRuleGB\nService" as RuleGBService
+participant "MMParlayRuleGB\nProcessService" as ProcessService
+participant "Association\nDetectionService" as AssocService
+participant "MMParlayRuleGB\nDataAccess" as DA
+database "MainDB\n(SQL Server)" as MainDB
+database "CTS_DataCenter\n(MySQL)" as CTS
+
+== Phase 1: Get Parlay Tickets from MainDB ==
+
+Job -> JobService: InsertParlayTicketDetail(batchSize, isLive)
+activate JobService
+
+JobService -> StagingService: Start(batchSize, isLive)
+activate StagingService
+
+StagingService -> StagingService: GetLastScannedSequenceID()
+
+StagingService -> MainDB: CALL CTS_MatchMonitorParlay_GetNewTicket\n(@LastScannedSequenceID, @IsLive, @BatchSize, @ListSportBettype)
+activate MainDB
+
+MainDB -> MainDB: Query bettrans\nWHERE Betteam = 1\nAND BetType = 29\nAND (BetCheck & 2 = 2 OR BetCheck & 4 = 4)
+
+MainDB -> MainDB: Get ticket details\nfrom bettransm\n(Multiple matches per Refno)
+
+MainDB --> StagingService: Return ticket list
+deactivate MainDB
+
+== Phase 2: Insert into Staging ==
+
+StagingService -> StagingService: GetParlayTicketStaging()
+
+StagingService -> StagingService: InsertParlayTicketStaging()
+
+StagingService -> CTS: INSERT INTO\nMatchMonitorParlayStagingGroupBetting[Live/NonLive]
+activate CTS
+
+CTS --> StagingService: Success
+deactivate CTS
+
+StagingService -> StagingService: UpdateLastScannedSequenceID()
+
+StagingService --> JobService: Success
+deactivate StagingService
+
+JobService --> Job: true
+deactivate JobService
+
+== Phase 3: Get Matches to Process ==
+
+Job -> JobService: ProcessParlayRuleGroupBetting(isLive, numberOfThread)
+activate JobService
+
+JobService -> RuleGBService: GetMMParlayRuleGroupBetting(isLive)
+activate RuleGBService
+
+RuleGBService -> DA: GetMMParlayRuleGroupBetting(isLive)
+activate DA
+
+DA -> CTS: CALL CTS_DC_MatchMonitorParlay_RuleGroupBetting_Get\n(ip_LiveIndicator, @op_MaxSequenceID)
+activate CTS
+
+CTS -> CTS: Read last processed SequenceID\nfrom SystemParameter
+
+CTS -> CTS: Read rule TimeStep\n(180 seconds)
+
+CTS -> CTS: Load Temp_OldGroup\n(existing groups)
+
+CTS -> CTS: Calculate time window\nMaxTime = MinTransDate + TimeStep
+
+CTS -> CTS: GROUP BY MatchID, ScoreDiff,\nBettypeID, BetID, Betteam, OldGroupID\nHAVING COUNT(DISTINCT CustID) > 1
+
+CTS --> DA: Return:\n- MaxSequenceID\n- Match groups\n  (MatchID, CustIDList, CTSCustIDList, TransIDmList)
+deactivate CTS
+
+DA --> RuleGBService: MMParlayRuleGroupBettingModel
+deactivate DA
+
+RuleGBService --> JobService: MMParlayRuleGroupBettingModel
+deactivate RuleGBService
+
+== Phase 4: Process Each Match (Parallel) ==
+
+loop For each match (parallel)
+    JobService -> RuleGBService: GetInstanceParlayProcessGBService()
+    activate RuleGBService
+    
+    RuleGBService --> JobService: ProcessService instance
+    deactivate RuleGBService
+    
+    JobService -> ProcessService: PrepareProcess(matchInfo, isLive)
+    activate ProcessService
+    
+    ProcessService --> JobService: this
+    
+    JobService -> ProcessService: ProcessRound1()
+    
+    note over ProcessService
+        **Round 1: Association Detection**
+    end note
+    
+    ProcessService -> AssocService: DetectAssociationLv1(param)
+    activate AssocService
+    note right
+        param = {
+            CTSCustIds: "...",
+            CustIds: "...",
+            IsDevice: true,
+            IsAI: true,
+            IsIP: true,
+            Is3MatchesLast7Days: true
+        }
+    end note
+    
+    AssocService --> ProcessService: Association result:\n[{CustID: 123, GroupID: 1}, ...]
+    deactivate AssocService
+    
+    ProcessService -> DA: ProcessRuleGroupBetting(\nisLive, matchInfo, transIDmList, groupDetection)
+    activate DA
+    
+    DA -> CTS: CALL CTS_DC_MatchMonitorParlay_RuleGroupBetting_Process\n(ip_LiveIndicator, ip_MatchID, ip_SportType, ip_ScoreDiff,\nip_BettypeID, ip_BetID, ip_Betteam,\nip_TransIDmList, ip_CustGroup)
+    activate CTS
+    
+    CTS -> CTS: Group tickets by TimeStep windows
+
+    CTS -> CTS: Filter: Each group must have >1 customer
+    
+    CTS --> DA: Return:\n- Complete groups\n- Reprocess groups
+    deactivate CTS
+    
+    DA --> ProcessService: MMParlayProcessRuleGroupBettingModel
+    deactivate DA
+    
+    ProcessService --> JobService: this
+    
+    JobService -> ProcessService: ProcessRound2()
+    
+    note over ProcessService
+        **Round 2: Reprocess unassigned tickets**
+    end note
+    
+    alt Has reprocess groups
+        loop For each reprocess group
+            ProcessService -> AssocService: DetectAssociationLv1(reprocessParam)
+            activate AssocService
+            
+            AssocService --> ProcessService: Association result
+            deactivate AssocService
+            
+            ProcessService -> DA: ProcessRuleGroupBetting(...)
+            activate DA
+            
+            DA -> CTS: CALL Process SP again
+            activate CTS
+            
+            CTS --> DA: Result
+            deactivate CTS
+            
+            DA --> ProcessService: Result
+            deactivate DA
+        end
+    end
+    
+    ProcessService --> JobService: this
+    
+    == Phase 5: Complete & Save ==
+    
+    JobService -> ProcessService: Complete(maxSequenceID)
+    
+    ProcessService -> DA: CompleteTransRuleGroupBetting(para)
+    activate DA
+    
+    DA -> CTS: CALL CTS_DC_MatchMonitorParlay_RuleGroupBetting_Complete\n(ip_LiveIndicator, ip_MaxSequenceID, ip_MatchID,\nip_ScoreDiff, ip_BettypeID, ip_BetID, ip_Betteam, ip_TransGroup)
+    activate CTS
+    
+    CTS -> CTS: Merge groups by TransIDList
+    
+    alt Match exists in MatchMonitorDetails
+        CTS -> CTS: Merge tickets (UNION)
+        CTS -> CTS: UPDATE MatchMonitorDetails
+    else Match not exists
+        CTS -> CTS: INSERT MatchMonitor
+        CTS -> CTS: INSERT MatchMonitorDetails
+    end
+    
+    CTS -> CTS: UPDATE staging table\nSET GroupID
+    
+    CTS --> DA: Success
+    deactivate CTS
+    
+    DA --> ProcessService: Success
+    deactivate DA
+    
+    ProcessService --> JobService: this
+    
+    JobService -> ProcessService: WriteLogSentryIfError(...)
+    
+    ProcessService --> JobService: void
+    deactivate ProcessService
+end
+
+== Phase 6: Clean Staging ==
+
+JobService -> RuleGBService: CleanTransRuleGroupBetting(isLive, maxSequenceID)
+activate RuleGBService
+
+RuleGBService -> DA: CleanTransRuleGroupBetting(isLive, maxSequenceID)
+activate DA
+
+DA -> CTS: CALL CTS_DC_MatchMonitorParlay_RuleGroupBetting_StagingClean\n(ip_LiveIndicator, ip_MaxSequenceID)
+activate CTS
+
+CTS -> CTS: DELETE FROM staging table\nWHERE SequenceID <= MaxSequenceID
+
+CTS -> CTS: UPDATE SystemParameter\nSET ParameterValue = MaxSequenceID
+
+CTS --> DA: Success
+deactivate CTS
+
+DA --> RuleGBService: Success
+deactivate DA
+
+RuleGBService --> JobService: Success
+deactivate RuleGBService
+
+JobService --> Job: true
+deactivate JobService
+
+@enduml
+

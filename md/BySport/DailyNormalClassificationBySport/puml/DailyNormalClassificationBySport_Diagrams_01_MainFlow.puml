@@ -1,0 +1,88 @@
+@startuml DailyNormalClassificationBySport_MainFlow
+!theme plain
+title Daily Normal Classification By Sport - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationBySportJobs/ScanningDailyNormalClassificationBySport
+    No parameters required
+end note
+
+:DailyNormalClassificationBySportJobService.Execute();
+
+repeat :Do-While Loop
+    :JobRun();
+    
+    :Start();
+    note right
+        Initialize NormalAccountBySportModel
+        customers = new NormalAccountBySportModel()
+    end note
+    
+    :GetCustClassificationForDailyScanning();
+    note right
+        Call CTS_DC_CustClassification_BySport_DailyScan_GetNormal [SP]
+        Database: CTS_DataCenter (MySQL)
+        Parameters:
+        - @op_LastCategoryID (OUTPUT)
+        - @op_LastCustID (OUTPUT)
+        Logic:
+        - Get normal categories with ScanIntervalInSecond > 0
+        - Get LastCategoryID and LastCustID from SystemParameter
+        - Find customers with:
+          * CategoryID = LastCategoryID
+          * CustID > LastCustID
+          * LastScannedDate <= ScanDateValid
+          * Active within 30 days
+        - If no customers found, move to next category
+        - Return: CustID, SportGroup
+        - Output: LastCategoryID, LastCustID
+        Returns:
+        - NormalAccounts (CustID, SportGroup)
+        - LastCategoryID
+        - LastCustID
+    end note
+    
+    if (Has Customers?) then (yes)
+        :PreprocessDailyNormalClassification();
+        note right
+            Convert customers to XML
+            Call CTS_BySportNormalClassification_Daily_Preprocess [SP]
+            Database: bodb_VR2Model (SQL Server)
+            Parameters:
+            - @CustomersXML (XML)
+            Logic:
+            - Parse XML customer list
+            - Remove disabled accounts
+            - Remove already scanned customers (today)
+            - Remove inactive customers (no transaction in 30 days)
+            - Get Priority from Priority table
+            - Call NormalPool_Insert
+            - Insert into Normal Pool for classification
+        end note
+        
+        :UpdateLastScan();
+        note right
+            Update SystemParameter:
+            - ParameterID = 114 (DailyNormalClassificationBySportLastCategoryID)
+              Value = LastCategoryID
+            - ParameterID = 115 (DailyNormalClassificationBySportLastCustID)
+              Value = LastCustID
+            Return: true (continue loop)
+        end note
+    else (no)
+        :UpdateLastScan();
+        note right
+            Update SystemParameter
+            Return: false (stop loop)
+        end note
+    endif
+    
+repeat while (Has More Customers?) is (yes)
+->no;
+
+stop
+
+@enduml
+

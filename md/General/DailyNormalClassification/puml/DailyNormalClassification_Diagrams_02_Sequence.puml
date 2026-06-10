@@ -1,0 +1,134 @@
+@startuml DailyNormalClassification_Sequence
+!theme plain
+title Daily Normal Classification - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationJob\nController" as Controller
+participant "DailyNormalClassification\nJobService" as JobService
+participant "DailyNormalClassification\nService" as Service
+participant "DailyNormalClassification\nDataAccess" as DataAccess
+participant "SystemParameter\nService" as SysParam
+database "MySQL\nCTS_DataCenter" as DataCenterDB
+database "SQL Server\nbodb_VR2Model" as VR2DB
+
+Scheduler -> Controller: POST /api/classificationJobs/scanningDailyNormalClassification
+activate Controller
+
+Controller -> JobService: Execute()
+activate JobService
+
+JobService -> JobService: Log: "Daily Normal Service is running"
+
+loop Do-While (isContinue = true)
+    
+    ' Step 1: Start
+    JobService -> Service: Start()
+    activate Service
+    Service -> Service: Initialize scanningCustomers entity
+    Service --> JobService: IDailyNormalClassificationServices
+    deactivate Service
+    
+    ' Step 2: GetCustomerForDailyNormalScanning
+    JobService -> Service: GetCustomerForDailyNormalScanning()
+    activate Service
+    
+    Service -> DataAccess: GetCustomerForDailyNormalScanning()
+    activate DataAccess
+    
+    DataAccess -> DataAccess: Create DailyNormalScanningGetCriteria
+    DataAccess -> DataCenterDB: EXEC CTS_DC_CustClassification_DailyScan_GetNormal\n@op_LastCategoryID OUTPUT, @op_LastCustID OUTPUT
+    activate DataCenterDB
+    note right of DataCenterDB
+        Stored Procedure:
+        - Read SystemParameter:
+          * LastCategoryID (85)
+          * LastCustID (86)
+        - Find next category to scan
+        - Get customers:
+          * CustID > LastCustID
+          * LastScannedDate due
+          * Active customers
+        - Output: New LastCategoryID, LastCustID
+    end note
+    DataCenterDB --> DataAccess: ResultSet: CustID[]\nop_LastCategoryID, op_LastCustID
+    deactivate DataCenterDB
+    
+    DataAccess -> DataAccess: Map to DailyNormalClassificationEntity
+    DataAccess --> Service: DailyNormalClassificationEntity
+    deactivate DataAccess
+    
+    Service --> JobService: DailyNormalClassificationEntity
+    deactivate Service
+    
+    alt Has Customers (CustID not empty)
+        JobService -> JobService: Join CustIds to comma-separated string
+        
+        ' Step 3: ClassifyDailyNormal
+        JobService -> Service: ClassifyDailyNormal(custIds)
+        activate Service
+        
+        Service -> DataAccess: ClassifyDailyNormal(custIds)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create DailyClassifyCriteria\nListCustId = custIds
+        DataAccess -> VR2DB: EXEC CTS_GeneralNormalClassification_Daily_Preprocess\n@ListCustId
+        activate VR2DB
+        note right of VR2DB
+            Stored Procedure:
+            - Parse customer ID list
+            - Get Priority (GroupId=1, FunctionId=2)
+            - Call NormalPool_Insert
+            - Insert into Normal Pool
+              with Daily priority
+        end note
+        VR2DB --> DataAccess: Success
+        deactivate VR2DB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service --> JobService: IDailyNormalClassificationServices
+        deactivate Service
+        
+        ' Step 4: UpdateLastScan
+        JobService -> Service: UpdateLastScan()
+        activate Service
+        
+        Service -> SysParam: UpdateTimingExecution(op_LastCustID, ParameterID=86)
+        activate SysParam
+        note right of SysParam
+            Update DailyNormalClassificationLastCustID
+        end note
+        SysParam --> Service: void
+        deactivate SysParam
+        
+        Service -> SysParam: UpdateTimingExecution(op_LastCategoryID, ParameterID=85)
+        activate SysParam
+        note right of SysParam
+            Update DailyNormalClassificationLastCategoryID
+        end note
+        SysParam --> Service: void
+        deactivate SysParam
+        
+        Service -> Service: Set isContinue = true
+        Service --> JobService: true (continue loop)
+        deactivate Service
+        
+    else No Customers
+        JobService -> Service: UpdateLastScan()
+        activate Service
+        Service -> Service: Set isContinue = false
+        Service --> JobService: false (exit loop)
+        deactivate Service
+    end
+    
+end
+
+JobService --> Controller: Task<bool> (true)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true }
+deactivate Controller
+
+@enduml
+

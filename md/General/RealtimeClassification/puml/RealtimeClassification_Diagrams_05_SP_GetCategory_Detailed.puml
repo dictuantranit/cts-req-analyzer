@@ -1,0 +1,167 @@
+@startuml RealtimeClassification_SP_GetCategory_Detailed
+!theme plain
+title Stored Procedure: CTS_DC_CustClassification_Realtime_GetCategory - Detailed Flow
+
+card "**SP: CTS_DC_CustClassification_Realtime_GetCategory**" as SP {
+  rectangle "**Database**: CTS_DataCenter (MySQL)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @ip_CustIDs (VARCHAR);
+  note right
+      Parameter: @ip_CustIDs
+      Format: "123,456,789,1011,1213,..."
+      
+      Comma-separated customer IDs
+  end note
+}
+
+partition "Parse Customer IDs" {
+  :Create temporary table;
+  note right
+      CREATE TEMPORARY TABLE Temp_Customers (
+        CustId BIGINT
+      );
+  end note
+  
+  :Parse comma-separated IDs;
+  note right
+      -- Split string by comma
+      INSERT INTO Temp_Customers (CustId)
+      SELECT 
+        CAST(TRIM(value) AS UNSIGNED) AS CustId
+      FROM (
+        -- String split logic
+        -- Using SUBSTRING_INDEX or JSON_TABLE
+      ) AS parsed_ids
+      WHERE value IS NOT NULL AND value != '';
+      
+      MySQL String Splitting:
+      - SUBSTRING_INDEX in loop
+      - JSON_TABLE (MySQL 8.0+)
+      - Custom split function
+  end note
+}
+
+partition "Get Current Classification" {
+  :Query customer classifications;
+  note right
+      SELECT 
+        tc.CustId,
+        cc.CategoryID,
+        cat.ParentID,
+        cc.RelevantCategoryID
+      INTO #TempClassification
+      FROM Temp_Customers tc
+      LEFT JOIN CTSCustomerClassification cc
+        ON tc.CustId = cc.CustId
+      LEFT JOIN CustomerCategory cat
+        ON cc.CategoryID = cat.CategoryID;
+      
+      **Tables**:
+      - CTSCustomerClassification: Current customer category
+      - CustomerCategory: Category hierarchy (ParentID)
+  end note
+}
+
+partition "Categorize Customers" {
+  :Separate Normal vs PA customers;
+  note right
+      **Business Rule**:
+      
+      **Normal Customers**:
+      - Classification IS NULL (new/unclassified)
+      - OR ParentID = CONST_PARENTID_NORMAL
+      
+      **PA Customers**:
+      - ParentID IN (CONST_PARENTID_PA, CONST_PARENTID_POTENTIALPA)
+      - AND RelevantCategoryID IS NOT NULL
+      
+      **Constants** (examples):
+      - CONST_PARENTID_NORMAL = 1
+      - CONST_PARENTID_PA = 2
+      - CONST_PARENTID_POTENTIALPA = 3
+  end note
+}
+
+partition "Return Result Sets" {
+  :Prepare ResultSet 1 - Normal Customers;
+  note right
+      SELECT CustId
+      FROM #TempClassification
+      WHERE (
+        CategoryID IS NULL
+        OR ParentID = CONST_PARENTID_NORMAL
+      )
+      ORDER BY CustId;
+      
+      **Purpose**: Insert into Normal Pool
+      **Next Step**: CTS_GeneralNormalClassification_Realtime_Preprocess
+  end note
+  
+  :Prepare ResultSet 2 - PA Customers;
+  note right
+      SELECT CustId
+      FROM #TempClassification
+      WHERE ParentID IN (
+        CONST_PARENTID_PA,
+        CONST_PARENTID_POTENTIALPA
+      )
+      AND RelevantCategoryID IS NOT NULL
+      ORDER BY CustId;
+      
+      **Purpose**: Insert into PA Daily Scan Queue
+      **Next Step**: CTS_DC_CustClassification_DailyScanPA_InsertToQueue
+  end note
+  
+  :Return 2 ResultSets;
+}
+
+partition "Cleanup" {
+  :Drop temporary tables;
+  note right
+      DROP TEMPORARY TABLE IF EXISTS Temp_Customers;
+      DROP TEMPORARY TABLE IF EXISTS #TempClassification;
+  end note
+}
+
+note right
+  **Key Logic**:
+  1. Parse comma-separated customer IDs
+  2. Get current classification from CTSCustomerClassification
+  3. Join with CustomerCategory to get ParentID
+  4. Categorize into Normal vs PA based on ParentID
+  5. Return 2 separate result sets
+  
+  **Tables Accessed**:
+  - CTSCustomerClassification (READ)
+    * CustId (PK)
+    * CategoryID (FK)
+    * RelevantCategoryID
+  - CustomerCategory (READ)
+    * CategoryID (PK)
+    * ParentID (Category hierarchy)
+    * CategoryName
+  
+  **Category Hierarchy**:
+  ```
+  Root
+  ├─ Normal (ParentID = 1)
+  │  ├─ Normal Platinum
+  │  ├─ Normal Gold
+  │  └─ ...
+  ├─ PA (ParentID = 2)
+  │  ├─ PA High Risk
+  │  └─ ...
+  └─ PotentialPA (ParentID = 3)
+     └─ ...
+  ```
+end note
+
+stop
+
+@enduml
+

@@ -1,0 +1,246 @@
+@startuml NormalAccountClassification_SP_Classify_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_NormalPool_Classify - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_NormalPool_Classify**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @CustomersXML (XML);
+  note right
+      Parameter: @CustomersXML
+      Format: XML String
+      
+      Example:
+      <ArrayOfr>
+        <r>
+          <CustId>123</CustId>
+          <CategoryId>5</CategoryId>
+          <IsNewCreated>false</IsNewCreated>
+          <IsProbationLastDay>false</IsProbationLastDay>
+          <IsRealtimeOnly>true</IsRealtimeOnly>
+          <ScanTaggingType>0</ScanTaggingType>
+          <ScanSpecialLicSubType>0</ScanSpecialLicSubType>
+          <IsSpecialLicSubCC>false</IsSpecialLicSubCC>
+        </r>
+        ...
+      </ArrayOfr>
+  end note
+}
+
+partition "Parse XML Data" {
+  :Create temporary table;
+  note right
+      CREATE TABLE #tmpCustomers (
+        CustId BIGINT,
+        CategoryId INT,
+        IsNewCreated BIT,
+        IsProbationLastDay BIT,
+        IsRealtimeOnly BIT,
+        ScanTaggingType INT,
+        ScanSpecialLicSubType INT,
+        IsSpecialLicSubCC BIT
+      );
+  end note
+  
+  :Parse XML using SQL Server XML functions;
+  note right
+      INSERT INTO #tmpCustomers
+      SELECT 
+        doc.col.value('CustId[1]', 'BIGINT') AS CustId,
+        doc.col.value('CategoryId[1]', 'INT') AS CategoryId,
+        doc.col.value('IsNewCreated[1]', 'BIT') AS IsNewCreated,
+        doc.col.value('IsProbationLastDay[1]', 'BIT') AS IsProbationLastDay,
+        doc.col.value('IsRealtimeOnly[1]', 'BIT') AS IsRealtimeOnly,
+        doc.col.value('ScanTaggingType[1]', 'INT') AS ScanTaggingType,
+        doc.col.value('ScanSpecialLicSubType[1]', 'INT') AS ScanSpecialLicSubType,
+        doc.col.value('IsSpecialLicSubCC[1]', 'BIT') AS IsSpecialLicSubCC
+      FROM @CustomersXML.nodes('/ArrayOfr/r') doc(col);
+  end note
+}
+
+partition "Apply Classification Logic" {
+  :Process each customer with business rules;
+  note right
+      Classification Decision Matrix:
+      
+      **FOR EACH customer:**
+      
+      1. **IsNewCreated = TRUE**
+         → Apply new customer classification
+         → Set initial category based on profile
+         → Mark as new for tracking
+      
+      2. **IsProbationLastDay = TRUE**
+         → Complete probation
+         → Apply permanent classification
+         → Remove probation flag
+      
+      3. **IsRealtimeOnly = TRUE**
+         → Skip daily classification logic
+         → Only realtime rules apply
+         → Optimize for speed
+      
+      4. **ScanTaggingType != 0**
+         → Apply special tagging logic
+         → Tag based on ScanTaggingType value
+         → Track for monitoring
+      
+      5. **ScanSpecialLicSubType = 1 AND IsSpecialLicSubCC = TRUE**
+         → Apply special licensee sub-type classification
+         → Use alternative category rules
+         → Compliance handling
+      
+      6. **Default**
+         → Apply standard classification
+         → Based on current CategoryId
+         → Normal flow
+  end note
+  
+  :Determine target classification;
+  note right
+      Calculate new category based on:
+      - Current CategoryId
+      - Customer activity/behavior
+      - Classification flags
+      - Business rules
+      
+      Possible outcomes:
+      - Keep current category
+      - Upgrade category (better behavior)
+      - Downgrade category (risk detected)
+      - Special category (flags triggered)
+  end note
+}
+
+partition "Update CustomerClassification Table" {
+  :Upsert classification;
+  note right
+      MERGE CustomerClassification AS target
+      USING #tmpCustomers AS source
+      ON target.CustId = source.CustId
+      
+      WHEN MATCHED THEN
+        UPDATE SET
+          CategoryId = [calculated_category],
+          LastModifiedDate = GETDATE(),
+          ModifiedBy = 'NormalAccountClassification',
+          IsRealtimeOnly = source.IsRealtimeOnly,
+          ScanTaggingType = source.ScanTaggingType,
+          -- Update other relevant fields
+      
+      WHEN NOT MATCHED THEN
+        INSERT (
+          CustId, CategoryId, CreatedDate,
+          IsRealtimeOnly, ScanTaggingType,
+          ...
+        )
+        VALUES (
+          source.CustId, [calculated_category], GETDATE(),
+          source.IsRealtimeOnly, source.ScanTaggingType,
+          ...
+        );
+      
+      **Purpose**: Apply classification to database
+  end note
+  
+  :Log classification changes (optional);
+  note right
+      INSERT INTO CustomerClassificationLog
+      SELECT 
+        CustId,
+        OldCategoryId,
+        NewCategoryId,
+        GETDATE() AS ChangedDate,
+        'NormalAccountClassification' AS ChangedBy,
+        'Normal Pool Classification' AS Reason
+      FROM [classification_changes];
+      
+      Track classification history for audit
+  end note
+}
+
+partition "Handle Special Cases" {
+  if (Has Special LicSub customers?) then (yes)
+    :Update SpecialLicSubCategory;
+    note right
+        UPDATE CustomerClassification
+        SET SpecialLicSubCategoryId = [calculated_special_category]
+        WHERE CustId IN (
+          SELECT CustId FROM #tmpCustomers
+          WHERE ScanSpecialLicSubType = 1
+            AND IsSpecialLicSubCC = 1
+        );
+    end note
+  endif
+  
+  if (Has Probation completions?) then (yes)
+    :Clear probation flags;
+    note right
+        UPDATE CustomerClassification
+        SET 
+          IsProbation = 0,
+          ProbationEndDate = NULL,
+          ProbationCompletedDate = GETDATE()
+        WHERE CustId IN (
+          SELECT CustId FROM #tmpCustomers
+          WHERE IsProbationLastDay = 1
+        );
+    end note
+  endif
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpCustomers;
+  end note
+}
+
+:Return success;
+
+note right
+  **Key Logic**:
+  1. Parse XML customer data with all classification flags
+  2. Apply complex classification rules based on flags
+  3. Calculate target category for each customer
+  4. MERGE (upsert) into CustomerClassification table
+  5. Handle special cases (LicSub, Probation)
+  6. Log changes for audit trail
+  
+  **Classification Rules Priority**:
+  1. IsNewCreated (highest priority)
+  2. IsProbationLastDay
+  3. IsSpecialLicSubCC + ScanSpecialLicSubType
+  4. ScanTaggingType
+  5. Standard classification (lowest priority)
+  
+  **Tables Accessed**:
+  - CustomerClassification (READ/WRITE)
+    * Main classification table
+    * Stores current and historical category
+  - CustomerClassificationLog (WRITE)
+    * Audit trail
+    * Track all classification changes
+  
+  **Performance**:
+  - XML parsing: SQL Server XML functions (fast)
+  - MERGE: Single operation for upsert
+  - Temp table: Batch processing
+  - Indexes on CustId: Fast lookup and update
+  
+  **Business Impact**:
+  - Determines customer risk level
+  - Affects betting limits
+  - Triggers monitoring rules
+  - Impacts customer experience
+end note
+
+stop
+
+@enduml
+

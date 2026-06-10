@@ -1,0 +1,100 @@
+@startuml MatchMonitorClassification_SP_GetMatches
+title CTS_DC_CustClassification_MatchMonitor_Get - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #F57C00
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+
+start
+:SP: **CTS_DC_CustClassification_MatchMonitor_Get**;
+note right
+  **Database**: CTS_DataCenter.ctsServiceAdmin
+  **Purpose**: Get list of matches needing status update
+  **Called by**: UpdateStatusMatchMonitor Job
+  **Return Type**: List<int> (MatchIDs)
+end note
+
+:Execute Query;
+note right
+  **Query Logic**:
+  ```sql
+  SELECT DISTINCT MatchID
+  FROM CTSMatchMonitor
+  WHERE 1=1
+    -- Get unfinished matches
+    AND (EventStatus IS NULL 
+         OR EventStatus NOT IN ('Closed', 'Finished'))
+    
+    -- Not yet completed
+    AND IsCompleted = 0
+    
+    -- Has associated details
+    AND EXISTS (
+      SELECT 1 
+      FROM CTSMatchMonitorDetail d
+      WHERE d.MatchID = CTSMatchMonitor.MatchID
+    )
+  
+  ORDER BY MatchID ASC
+  ```
+  
+  **Filters**:
+  - Unfinished matches (not Closed/Finished)
+  - Not completed (IsCompleted = 0)
+  - Has detection details
+  
+  **Purpose**:
+  - Get matches needing status sync
+  - Maintain accurate EventStatus
+  - Track match lifecycle
+end note
+
+:Return MatchID List;
+note right
+  **Output Example**:
+  [12345, 67890, 11111, 22222, ...]
+  
+  **Usage**:
+  - Convert to comma-separated string
+  - Pass to CTS_MatchInfo_Get SP
+  - Get match info from MainDB
+  - Update status in CTS database
+end note
+
+:Complete;
+
+note right
+  **Key Characteristics**:
+  
+  **Simple SELECT**:
+  - No INSERT/UPDATE/DELETE
+  - Read-only operation
+  - Fast execution
+  
+  **Used For**:
+  - Status synchronization
+  - Maintenance job
+  - Keep CTS data fresh
+  
+  **Not Used For**:
+  - Classification logic
+  - Detection rules
+  - Customer tagging
+  
+  **Performance**:
+  - Indexed on EventStatus, IsCompleted
+  - DISTINCT to avoid duplicates
+  - Ordered for consistency
+  
+  **Related Tables**:
+  - CTSMatchMonitor (main)
+  - CTSMatchMonitorDetail (referenced)
+end note
+
+stop
+
+@enduml
+

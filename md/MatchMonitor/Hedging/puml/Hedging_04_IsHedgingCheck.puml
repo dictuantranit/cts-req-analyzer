@@ -1,0 +1,153 @@
+@startuml Hedging_IsHedgingCheck
+!theme plain
+title Hedging Detection - IsHedging Flag Check Logic
+
+start
+
+:Group detected in Process SP\n(GroupID, CustIDList);
+
+:Extract CustIDList from group;
+
+note right
+    **Example:**
+    CustIDList: "5001,5002,5003"
+end note
+
+:Parse CustIDList into Temp_Cust table;
+
+partition "**Customer Classification Check**" {
+    :Get latest customer classification\nfor each customer;
+    
+    note right
+        **Query Logic:**
+        ```sql
+        SELECT CustID, CategoryID, ParentID
+        FROM Temp_Cust
+        INNER JOIN CTSCustomerClassification
+        INNER JOIN CustomerCategory
+        WHERE ParentID <> CONST_PARENTID_WRAPPER
+        ORDER BY CustomerClassPriority ASC,
+                 LastModifiedDate DESC
+        LIMIT 1
+        ```
+        
+        **Get highest priority, latest category**
+    end note
+    
+    :Check if customer has PA category\nwith IsHedgingReasonMM = 1;
+    
+    note right
+        **Conditions:**
+        1. ParentID = CONST_PARENTID_PA
+           (Problem Account parent)
+        2. ParentID <> CONST_PARENTID_VVIP
+           (Not VVIP)
+        3. IsHedgingReasonMM = 1
+           (Flagged for hedging detection)
+    end note
+    
+    if (Any customer has IsHedgingReasonMM = 1?) then (yes)
+        :Set IsHedging = TRUE;
+        
+        note right
+            **Fast Path:**
+            Customer already flagged
+            for hedging in category
+        end note
+        
+        :Update Temp_Completed\nSET IsHedging = TRUE;
+        
+    else (no)
+        partition "**Additional Association Check**" {
+            :Call SP:\nCTS_DC_Association_IsAssociatedHedgingCustByCustIDList\n(ip_CustIDList, @op_IsHedging);
+            
+            note right
+                **This SP performs:**
+                - Historical hedging pattern check
+                - Cross-customer hedging association
+                - Time-based hedging frequency
+                - Multiple match hedging patterns
+            end note
+            
+            if (SP returns IsHedging = TRUE?) then (yes)
+                :Set IsHedging = TRUE;
+                
+                note right
+                    **Detected via association:**
+                    Customers have hedging history
+                    or patterns together
+                end note
+                
+                :Update Temp_Completed\nSET IsHedging = TRUE;
+                
+            else (no)
+                :Set IsHedging = FALSE;
+                
+                note right
+                    **Not Hedging:**
+                    - No category flag
+                    - No association detected
+                    - Group is not suspicious
+                end note
+                
+                :Update Temp_Completed\nSET IsHedging = FALSE;
+            endif
+        }
+    endif
+}
+
+:Return IsHedging flag for group;
+
+if (IsHedging = TRUE?) then (yes)
+    :Group marked as complete\n(ready to save);
+    
+    :Will be inserted into\nMatchMonitor & MatchMonitorDetails;
+    
+else (no)
+    :Group filtered out\n(not saved);
+    
+    :Tickets remain in staging\nfor next iteration;
+endif
+
+stop
+
+floating note left
+    **IsHedging Flag Flow:**
+    
+    **Check 1: Customer Classification**
+    ↓
+    Has IsHedgingReasonMM = 1?
+    ├─ YES → IsHedging = TRUE ✓
+    └─ NO → Continue to Check 2
+    
+    **Check 2: Association Check SP**
+    ↓
+    CTS_DC_Association_IsAssociatedHedgingCustByCustIDList
+    ├─ TRUE → IsHedging = TRUE ✓
+    └─ FALSE → IsHedging = FALSE ✗
+    
+    **Final Result:**
+    - IsHedging = TRUE → Save to DB
+    - IsHedging = FALSE → Discard
+end note
+
+floating note right
+    **Customer Category Settings:**
+    
+    **IsHedgingReasonMM Flag:**
+    - Set in CustomerCategory table
+    - Only for PA (Problem Account) categories
+    - Manually configured per category
+    
+    **Example Categories with Flag:**
+    - Category 101: "Hedging Detected"
+    - Category 102: "Cross-Platform Hedging"
+    - Category 103: "Internal Hedging Pattern"
+    
+    **CategoryID → IsHedgingReasonMM:**
+    - NULL or 0: Not flagged
+    - 1: Flagged for hedging detection
+end note
+
+@enduml
+

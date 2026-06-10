@@ -1,0 +1,243 @@
+@startuml DailyRobotClassification_SP_AIRobotDetection
+title CTS_DC_RobotDetection_GetLatest - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E8F5E9
+skinparam activityBorderColor #4CAF50
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_RobotDetection_GetLatest
+  **Database**: CTS_DataCenter.ctsService (MySQL)
+  **Timeout**: 300 seconds (default)
+  **Called From**: RobotDetectionGetLatestCriteria
+end note
+
+partition "Input Parameters" {
+  :Receive @ip_RobotDetectionLastID (long);
+  note right
+    **Last Processed ID**:
+    - For incremental pagination
+    - Start from last processed RobotDetectionID
+    - WHERE RobotDetectionID > @ip_RobotDetectionLastID
+  end note
+}
+
+partition "Get Pagination State" {
+  :Read System Parameter (optional);
+  note right
+    **Already provided as input**:
+    - @ip_RobotDetectionLastID from system parameter
+    - No need to query again
+    
+    **Initial State** (first run):
+    - @ip_RobotDetectionLastID = 0
+    - Get all robots from beginning
+    
+    **Subsequent Runs**:
+    - Start from last processed ID + 1
+    - Incremental processing
+  end note
+}
+
+partition "Query AI Robot Detections" {
+  :Calculate batch size;
+  note right
+    **Batch Limit**: Configurable
+    - Typical: 5000-10000 robots
+    - Prevents memory overflow
+    - Balance throughput vs resources
+  end note
+
+  :SELECT from RobotDetection table;
+  note right
+    **Query**:
+    ```sql
+    SELECT 
+      RobotDetectionID,
+      CustID,
+      CategoryID,
+      LastModifiedDate
+    FROM RobotDetection
+    WHERE RobotDetectionID > @ip_RobotDetectionLastID
+    ORDER BY RobotDetectionID ASC
+    LIMIT @batchSize
+    ```
+    
+    **Filter Conditions**:
+    1. **RobotDetectionID > @ip_RobotDetectionLastID**:
+       - Incremental pagination
+       - Skip already processed robots
+       - Start from last + 1
+    
+    **Ordering**:
+    - ORDER BY RobotDetectionID ASC
+    - Consistent sequential processing
+    - FIFO (First In, First Out)
+    
+    **Limit**:
+    - Batch size for memory efficiency
+    - Prevents overwhelming system
+  end note
+}
+
+partition "Data Source Context" {
+  note right
+    **RobotDetection Table** (populated by AI/ML):
+    
+    **Table Structure**:
+    ```sql
+    CREATE TABLE RobotDetection (
+      RobotDetectionID BIGINT PRIMARY KEY AUTO_INCREMENT,
+      CustID BIGINT NOT NULL,
+      CategoryID INT,              -- Robot category
+      DetectionScore DECIMAL(5,2), -- AI confidence score
+      DetectionDate DATETIME,      -- When AI detected
+      LastModifiedDate DATETIME,
+      ModelVersion VARCHAR(50),    -- ML model version
+      DetectionReason TEXT,        -- Why flagged as robot
+      INDEX idx_RobotDetectionID (RobotDetectionID),
+      INDEX idx_CustID (CustID),
+      INDEX idx_DetectionDate (DetectionDate)
+    )
+    ```
+    
+    **Populated By**: AI/ML Robot Detection System
+    
+    **AI Detection Criteria**:
+    1. **Automated Betting Patterns**:
+       - High-frequency betting (> threshold)
+       - Consistent time intervals (< 10 seconds)
+       - Repetitive bet amounts
+       - Predictable patterns
+    
+    2. **Behavioral Indicators**:
+       - API-based betting (not web UI)
+       - No human-like randomness
+       - Instant bet placement
+       - Multiple simultaneous bets
+    
+    3. **ML Model Scoring**:
+       - Pattern recognition algorithms
+       - Historical data analysis
+       - Confidence score calculation
+       - Threshold-based flagging
+    
+    4. **Detection Score**:
+       - 0-100 scale (higher = more confident)
+       - Threshold: e.g., > 80 = robot
+       - Model confidence level
+    
+    **Population Process**:
+    1. ML model runs periodically (e.g., every hour)
+    2. Analyzes all customer betting patterns
+    3. Calculates robot detection score
+    4. Scores above threshold inserted into table
+    5. Includes model metadata (version, reason)
+  end note
+}
+
+partition "Build Result Set" {
+  :Build RobotAIEntity[];
+  note right
+    **Result Structure**:
+    - RobotDetectionID (long) - For pagination
+    - CustID (long) - Customer identifier
+    - CategoryID (int) - Robot category
+    - LastModifiedDate (DateTime)
+    
+    **Usage**:
+    - CustID for PA insertion
+    - CategoryID for robot category
+    - RobotDetectionID for pagination tracking
+  end note
+}
+
+:Return RobotAIEntity[];
+note right
+  **Return Type**: List<RobotAIEntity>
+  
+  **Count**: 0 to @batchSize robots
+  
+  **Empty Result Indicates**:
+  - All AI robots processed
+  - No new robots detected since last run
+  - Job can complete
+  
+  **Non-Empty Result**:
+  - Process these robots as PA
+  - Update LastID after processing
+  - May have more in next run
+end note
+
+:Log Execution;
+note right
+  **Logging**:
+  - Robot count returned
+  - RobotDetectionID range
+  - Query execution time
+  - Any errors/warnings
+end note
+
+note right
+  **Pagination Logic Summary**:
+  
+  **First Iteration**:
+  - @ip_RobotDetectionLastID = 0
+  - Get first batch (oldest robots)
+  - Return robots with IDs 1-5000 (example)
+  - Next LastID = 5000
+  
+  **Subsequent Iterations**:
+  - @ip_RobotDetectionLastID = 5000 (from previous)
+  - Get next batch (IDs > 5000)
+  - Return robots with IDs 5001-10000
+  - Next LastID = 10000
+  
+  **Last Iteration**:
+  - Returns < @batchSize robots (partial batch)
+  - Or returns 0 robots (all processed)
+  - LastID updated to MAX(RobotDetectionID)
+  
+  **Advantages**:
+  1. **Simple Pagination**: Just use auto-increment ID
+  2. **No Duplicates**: RobotDetectionID > @LastID prevents re-processing
+  3. **Fast Queries**: Index on RobotDetectionID
+  4. **Resumable**: Can resume from LastID if interrupted
+  5. **Consistent**: ORDER BY ensures reliable pagination
+  
+  **AI/ML Integration**:
+  - This SP is **consumer** of AI/ML output
+  - AI/ML system is **producer** (populates RobotDetection)
+  - Decoupled architecture
+  - ML model can evolve independently
+  - Audit trail of AI detections preserved
+  
+  **Performance**:
+  - Query time: < 500ms (with index)
+  - Batch size: 5000-10000 (configurable)
+  - Memory efficient
+  - Scalable to millions of robots
+  
+  **Business Logic**:
+  - Only AI-confirmed robots processed
+  - ML model confidence baked in
+  - Automatic classification (no manual review)
+  - Continuous monitoring and detection
+  
+  **Comparison with TW Robot**:
+  - AI Robot: Automated, ML-based, ID pagination
+  - TW Robot: Rule-based, manual, time pagination
+  - AI: Fast (300s), TW: Slow (900s)
+  - AI: Simple, TW: Complex
+end note
+
+stop
+
+@enduml
+

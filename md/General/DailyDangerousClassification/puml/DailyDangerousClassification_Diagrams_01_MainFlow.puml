@@ -1,0 +1,226 @@
+@startuml DailyDangerousClassification_MainFlow
+title Daily Dangerous Classification - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam titleFontSize 16
+skinparam titleFontStyle bold
+
+|JobService|
+start
+:POST /api/classificationJobs/scanningDailyDangerousClassification;
+note right
+  Parameters:
+  - batchSize: Batch size for external push
+  - isLicensee: Process Licensee or Credit customers
+  
+  Ex: batchSize = 5000, isLicensee = true
+end note
+
+:Execute(batchSize, isLicensee);
+
+:Prepare push parameters;
+note right
+  **PushDataToExternalEntity**:
+  - RoleGroup: Member
+  - ExternalBatchSize: batchSize
+  - IsUpdateDangerToMainDB: true
+  - IsWriteLog: from appSettings
+  - ServiceName: "DailyDangerousClassificationJobService"
+end note
+
+|Do-While Loop|
+note right
+  **Pagination Loop**:
+  Continue until all dangerous customers processed
+  Separate tracking for Licensee vs Credit
+end note
+
+repeat
+  |Service Layer|
+  :GetDangerousClassification(isLicensee);
+  note right
+    **Get Dangerous Customers**:
+    - FROM DangerousDetection table
+    - WHERE IsLicensee = @isLicensee
+    - AND CustID > LastCustID (pagination)
+    - AND ClassifiedDate > LastScannedDate
+    - AND ClassifiedScore > Threshold
+    - ORDER BY CustID
+    
+    **Source**: AI/ML Detection System ⭐
+    
+    **System Parameters** (based on isLicensee):
+    - Deposit: DangerousScoreClassification_Deposit_*
+    - Credit: DangerousScoreClassification_Credit_*
+    
+    **Returns**:
+    - DangerousCCLastScanned:
+      * LastCustID (pagination)
+      * LastScannedDate (pagination)
+    - DangerousCCs[]:
+      * CustID, CTSCustID
+      * CategoryID, CategoryGroup
+      * ClassifiedScore, ClassifiedDate
+      * SubscriberID, RoleID
+  end note
+
+  :Check isContinue;
+  note right
+    **Continue Condition**:
+    isContinue = (LastCustID > 0)
+    
+    - LastCustID > 0: More customers to process
+    - LastCustID = 0: All done
+  end note
+
+  if (isContinue?) then (yes)
+    |Service Layer|
+    :Transform to PA entities;
+    note right
+      **DangerousToCCEntity → InsertProblemAccountEntity**:
+      
+      For each dangerous customer:
+      {
+        CustID: x.CustID,
+        CTSCustID: x.CTSCustID,
+        RoleID: x.RoleID,
+        SubscriberID: x.SubscriberID,
+        CategoryID: x.CategoryID,
+        CategoryGroupID: x.CategoryGroup,
+        IsLicensee: isLicensee,
+        CreatedBy: StarixITId,
+        Remark: "",
+        IsMarkedDirectly: null,
+        **IsFromAI: true**, ⭐
+        IsFromCTS: false,
+        IsFromTVS: false,
+        IsFromTW: false
+      }
+      
+      **Key Flag**: IsFromAI = true
+      Indicates AI/ML detection source
+    end note
+
+    :Chunk by externalBatchSize;
+    note right
+      Split into batches for processing
+      Batch size from push parameters
+    end note
+
+    repeat
+      :Process chunk;
+      
+      :InsertProblemAccountPackage();
+      note right
+        **Insert PA Classification**:
+        - FunctionId: DailyDangerousClassification
+        - CCInputFlow: Potential
+        - Insert into CTSCustomerClassification
+        - Apply PA rules and logic
+        - Returns: Inserted CustIDs
+        
+        **Inherited Method** from ProblemAccountServices
+      end note
+
+      :PushExternalPackageByCustId();
+      note right
+        **Push to MainDB** (External):
+        - Input: Inserted CustIDs
+        - Parameters: paras (push parameters)
+        - Makes dangerous classification visible
+        - Batch push for efficiency
+      end note
+
+    repeat while (More chunks?) is (yes)
+    -> no;
+
+    |System Parameters|
+    :Update LastCustID;
+    note right
+      **Update System Parameter**:
+      - If isLicensee = true:
+        Key: DangerousScoreClassification_Deposit_LastCustID
+      - If isLicensee = false:
+        Key: DangerousScoreClassification_Credit_LastCustID
+      
+      Value: dangerousCCs.LastCustID
+    end note
+
+    :Update LastScannedDate;
+    note right
+      **Update System Parameter**:
+      - If isLicensee = true:
+        Key: DangerousScoreClassification_Deposit_LastScannedDate
+      - If isLicensee = false:
+        Key: DangerousScoreClassification_Credit_LastScannedDate
+      
+      Value: dangerousCCs.LastScannedDate
+    end note
+  else (no)
+    note right
+      **No more dangerous customers**:
+      All processed for current customer type
+    end note
+  endif
+
+repeat while (isContinue = true?) is (yes)
+-> no;
+
+|JobService|
+:Complete;
+note right
+  **Job Completion**:
+  All dangerous customers processed
+  for selected customer type (Licensee or Credit)
+  
+  **Separate Runs**:
+  - Run 1: isLicensee = true (Deposit customers)
+  - Run 2: isLicensee = false (Credit customers)
+end note
+
+stop
+
+note bottom
+  **Key Characteristics**:
+  
+  1. **AI/ML Detection Source** ⭐:
+     - Dangerous score calculated by ML models
+     - Automated classification
+     - IsFromAI = true flag
+  
+  2. **Separate Licensee vs Credit**:
+     - Two separate job runs
+     - Independent pagination tracking
+     - Different system parameters
+  
+  3. **Do-While Loop**:
+     - Simple loop structure
+     - Continues until LastCustID = 0
+     - Pagination via system parameters
+  
+  4. **Batch Processing**:
+     - Chunk by externalBatchSize
+     - Insert PA + Push to MainDB per chunk
+     - Optimized external push
+  
+  5. **Data Transformation**:
+     - DangerousToCCEntity → InsertProblemAccountEntity
+     - Set IsFromAI = true (AI detection marker)
+     - Set CreatedBy = StarixITId
+  
+  6. **External Push**:
+     - Push to MainDB after each chunk
+     - Makes dangerous classification visible
+     - Enables external monitoring
+  
+  7. **Inheritance**:
+     - Extends ProblemAccountServices
+     - Reuses InsertProblemAccountPackage method
+     - Consistent PA insertion logic
+end note
+
+@enduml
+

@@ -1,0 +1,601 @@
+@startuml MatchMonitorGroupBetting_DatabaseFlow
+!theme plain
+title Match Monitor Group Betting - Database Operations Flow
+
+|Application|
+start
+
+floating note : PHASE 1 - STAGING
+
+:Get LastScannedSequenceID;
+
+|CTS_DataCenter (MySQL)|
+:Query SystemParameter;
+note right
+    SELECT ParameterValue
+    FROM SystemParameter
+    WHERE ParameterID = @ParameterID
+    
+    For Live: ParameterID = MatchMonitorLastScannedTrans
+    For Non-Live: ParameterID = MatchMonitorLastScannedTransNoneLive
+    
+    Returns: "12345678"
+end note
+
+|Application|
+:LastSequenceID = 12345678;
+
+:Get Bet Type Settings;
+
+|CTS_DataCenter (MySQL)|
+:Query BetTypeSettings;
+note right
+    SELECT 
+        SportTypeID,
+        BetTypeID,
+        BetChoiceType,
+        BetIDPattern
+    FROM BetTypeSettings
+    WHERE FunctionID = @FunctionID
+        AND Status = 1
+        AND IsFilterMMDetection = 1
+    
+    FunctionID = MMBetType
+    
+    Returns: BetTypeInfo[] as JSON
+end note
+
+|Application|
+:BetTypeInfosJson;
+
+:Get Match Transactions;
+
+|MainDB (SQL Server)|
+:SP: CTS_MatchMonitor_GetTicketTrans;
+note right
+    EXEC CTS_MatchMonitor_GetTicketTrans
+        @LastSequenceID = 12345678,
+        @BatchSize = 1000,
+        @IsLive = 1,
+        @BetTypeInfos = '[...]'
+    
+    Logic:
+    -----
+    SELECT TOP (@BatchSize)
+        SequenceID,
+        MatchID,
+        BetID,
+        BettypeID,
+        CustID,
+        CTSCustID,
+        Amount,
+        Odds,
+        Betteam,
+        ScoreDiff,
+        SportType,
+        LicenseCustID,
+        DeviceID,
+        IPAddress,
+        BetTime,
+        CreatedDate
+    FROM TicketTrans WITH (NOLOCK)
+    WHERE SequenceID > @LastSequenceID
+        AND IsLive = @IsLive
+        AND BettypeID IN (
+            SELECT BettypeID 
+            FROM OPENJSON(@BetTypeInfos)
+            WITH (BettypeID int '$.BettypeID')
+        )
+    ORDER BY SequenceID ASC
+    
+    Returns:
+    --------
+    TicketDetailEntity[] (max 1000 records)
+end note
+
+|Application|
+:TicketDetailEntity[];
+:Convert to JSON;
+
+fork
+    |Application|
+    :Insert to Pool 1;
+    
+    |CTS_DataCenter (MySQL)|
+    :SP: CTS_MatchMonitor_InsertStaging;
+    note right
+        EXEC CTS_MatchMonitor_InsertStaging
+            @MatchTransJson = '[...]',
+            @IsLive = 1,
+            @PoolType = 1  -- GroupBetting
+        
+        Logic:
+        -----
+        INSERT INTO CTSMatchMonitorStaging (
+            MatchID, BetID, BettypeID,
+            CustID, CTSCustID,
+            Amount, Odds, Betteam, ScoreDiff,
+            SportType, LicenseCustID,
+            DeviceID, IPAddress, BetTime,
+            SequenceID, PoolType, IsLive,
+            IsProcessed, CreatedDate
+        )
+        SELECT 
+            MatchID, BetID, BettypeID,
+            CustID, CTSCustID,
+            Amount, Odds, Betteam, ScoreDiff,
+            SportType, LicenseCustID,
+            DeviceID, IPAddress, BetTime,
+            SequenceID, @PoolType, @IsLive,
+            0, NOW()
+        FROM JSON_TABLE(@MatchTransJson, '$[*]'
+            COLUMNS (
+                MatchID BIGINT PATH '$.MatchID',
+                BetID VARCHAR(20) PATH '$.BetID',
+                BettypeID INT PATH '$.BettypeID',
+                CustID VARCHAR(50) PATH '$.CustID',
+                CTSCustID INT PATH '$.CTSCustID',
+                Amount DECIMAL(18,2) PATH '$.Amount',
+                Odds DECIMAL(10,3) PATH '$.Odds',
+                Betteam VARCHAR(10) PATH '$.Betteam',
+                ScoreDiff VARCHAR(20) PATH '$.ScoreDiff',
+                SportType INT PATH '$.SportType',
+                LicenseCustID VARCHAR(50) PATH '$.LicenseCustID',
+                DeviceID VARCHAR(100) PATH '$.DeviceID',
+                IPAddress VARCHAR(50) PATH '$.IPAddress',
+                BetTime DATETIME PATH '$.BetTime',
+                SequenceID BIGINT PATH '$.SequenceID'
+            )
+        ) AS jt;
+        
+        Table: CTSMatchMonitorStaging
+        Indexes:
+        - PRIMARY KEY (ID)
+        - INDEX idx_staging_main (IsLive, PoolType, IsProcessed, SequenceID)
+        - INDEX idx_staging_match (MatchID, BetID, Betteam, ScoreDiff)
+        - INDEX idx_staging_cust (CustID, CTSCustID)
+    end note
+
+fork again
+    |Application|
+    :Insert to Pool 2;
+    |CTS_DataCenter (MySQL)|
+    :SP: CTS_MatchMonitor_InsertStaging;
+    note right
+        Same SP, PoolType = 2 (Hedging)
+    end note
+
+fork again
+    |Application|
+    :Insert to Pool 3;
+    |CTS_DataCenter (MySQL)|
+    :SP: CTS_MatchMonitor_InsertStaging;
+    note right
+        Same SP, PoolType = 3 (Arbitrage)
+    end note
+
+end fork
+
+|Application|
+:All Pools Inserted;
+
+:Update LastScannedSequenceID;
+
+|CTS_DataCenter (MySQL)|
+:Update SystemParameter;
+note right
+    UPDATE SystemParameter
+    SET ParameterValue = '12346678',
+        ModifiedDate = NOW()
+    WHERE ParameterID = @ParameterID
+    
+    New SequenceID = MAX(SequenceID) from inserted tickets
+    Next run will start from 12346679
+end note
+
+|Application|
+:Phase 1 Complete;
+
+floating note : PHASE 2 - PROCESSING
+
+:Get Match List for Processing;
+
+|CTS_DataCenter (MySQL)|
+:SP: CTS_MatchMonitor_RuleGroupBetting_Get;
+note right
+    EXEC CTS_MatchMonitor_RuleGroupBetting_Get
+        @IsLive = 1
+    
+    Logic:
+    -----
+    -- Step 1: Get MaxSequenceID
+    SELECT @MaxSequenceID = MAX(SequenceID)
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive = @IsLive
+        AND PoolType = 1  -- GroupBetting Pool
+        AND IsProcessed = 0;
+    
+    -- Result Set 1: MaxSequenceID
+    SELECT @MaxSequenceID AS MaxSequenceID;
+    
+    -- Step 2: Get Match List (Grouped)
+    SELECT 
+        MatchID,
+        ScoreDiff,
+        BettypeID,
+        BetID,
+        Betteam,
+        GROUP_CONCAT(SequenceID ORDER BY SequenceID SEPARATOR ',') AS SequenceIDList,
+        GROUP_CONCAT(CTSCustID ORDER BY CTSCustID SEPARATOR ',') AS CTSCustIDList,
+        GROUP_CONCAT(CustID ORDER BY CustID SEPARATOR ',') AS CustIDList,
+        GROUP_CONCAT(DISTINCT LicenseCustID ORDER BY LicenseCustID SEPARATOR ',') AS LicCustList,
+        SportType,
+        COUNT(*) AS TicketCount,
+        SUM(Amount) AS TotalAmount
+    FROM CTSMatchMonitorStaging
+    WHERE IsLive = @IsLive
+        AND PoolType = 1
+        AND IsProcessed = 0
+        AND SequenceID <= @MaxSequenceID
+    GROUP BY MatchID, ScoreDiff, BettypeID, BetID, Betteam, SportType
+    HAVING COUNT(*) >= 2  -- At least 2 tickets for group detection
+    ORDER BY MatchID, BettypeID, BetID, Betteam;
+    
+    Returns:
+    --------
+    Result Set 1: MaxSequenceID = 12346678
+    Result Set 2: MatchStagingRuleGroupBettingEntity[]
+        (e.g., 50 match groups)
+    
+    Indexes Used:
+    - idx_staging_main (WHERE clause)
+    - idx_staging_match (GROUP BY clause)
+end note
+
+|Application|
+:MaxSequenceID = 12346678;
+:MatchStagingList[] (50 matches);
+
+repeat :For Each Match (Parallel);
+
+    partition "Process Single Match" {
+        :Extract Customer Lists;
+        note right
+            From MatchStaging:
+            - CTSCustIDList = "5001,5002,5003,5004,5005"
+            - CustIDList = "user1,user2,user3,user4,user5"
+            - LicCustList = "lic1,lic2,lic3"
+            - SportType = 1 (Soccer)
+        end note
+        
+        :Association Detection;
+        
+        |CTS_DataCenter (MySQL)|
+        :SP: CTS_AssociationDetection_Lv1;
+        note right
+            EXEC CTS_AssociationDetection_Lv1
+                @CTSCustIds = '5001,5002,5003,5004,5005',
+                @CustIds = 'user1,user2,user3,user4,user5',
+                @IsDevice = 1,
+                @IsAI = 1,
+                @IsIP = 1,
+                @Is3MatchesLast7Days = 1,
+                @IsIPLast3Days = 1,
+                @CustIdsIPLast3Days = 'lic1,lic2,lic3'
+            
+            Logic:
+            -----
+            -- Parse customer IDs
+            CREATE TEMP TABLE TempCustIds ...
+            
+            -- Device Detection (if @IsDevice = 1)
+            CREATE TEMP TABLE TempDeviceGroups AS
+            SELECT CustID, DeviceID, ROW_NUMBER() OVER(...) AS GroupID
+            FROM CTSCustomer
+            WHERE CustID IN (SELECT CustID FROM TempCustIds)
+                AND DeviceID IS NOT NULL
+            GROUP BY DeviceID
+            HAVING COUNT(*) > 1;
+            
+            -- AI Detection (if @IsAI = 1)
+            CREATE TEMP TABLE TempAIGroups AS
+            ... (Call ML service or complex pattern matching)
+            
+            -- IP Detection (if @IsIP = 1)
+            CREATE TEMP TABLE TempIPGroups AS
+            SELECT CustID, IPAddress, ROW_NUMBER() OVER(...) AS GroupID
+            FROM TicketTrans
+            WHERE CustID IN (SELECT CustID FROM TempCustIds)
+                AND BetTime >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+            GROUP BY IPAddress
+            HAVING COUNT(DISTINCT CustID) > 1;
+            
+            -- 3 Matches Last 7 Days (if @Is3MatchesLast7Days = 1)
+            CREATE TEMP TABLE Temp3MatchGroups AS
+            ... (Complex co-betting history query)
+            
+            -- IP Last 3 Days (if @IsIPLast3Days = 1)
+            CREATE TEMP TABLE TempIPLast3DaysGroups AS
+            ... (Similar to IP detection, 3-day window)
+            
+            -- Merge All Groups
+            CREATE TEMP TABLE TempMergedGroups AS
+            SELECT 
+                CustID,
+                MIN(GroupID) AS GroupID,
+                GROUP_CONCAT(DISTINCT AssociationType) AS AssociationType
+            FROM (
+                SELECT * FROM TempDeviceGroups
+                UNION ALL
+                SELECT * FROM TempAIGroups
+                UNION ALL
+                SELECT * FROM TempIPGroups
+                UNION ALL
+                SELECT * FROM Temp3MatchGroups
+                UNION ALL
+                SELECT * FROM TempIPLast3DaysGroups
+            ) AllGroups
+            GROUP BY CustID;
+            
+            -- Transitive Grouping
+            -- (If A-B same group, B-C same group → A-B-C same group)
+            ... (Graph algorithm for group merging)
+            
+            -- Return Results
+            SELECT 
+                CustID,
+                CTSCustID,
+                GroupID,
+                AssociationType,
+                ConfidenceScore
+            FROM TempMergedGroups
+            WHERE GroupID IS NOT NULL
+            ORDER BY GroupID, CustID;
+            
+            Returns:
+            --------
+            DetectAssociationMergeGroupLv1Entity[]
+            - CustID, CTSCustID, GroupID, AssociationType
+            
+            Tables Read:
+            - CTSCustomer (Device info)
+            - TicketTrans (IP, BetTime)
+            - CTSAssociationCache (Historical associations)
+            
+            Indexes Used:
+            - idx_customer_device (CTSCustID, DeviceID)
+            - idx_trans_ip (CustID, BetTime, IPAddress)
+        end note
+        
+        |Application|
+        :AssociationResults[];
+        
+        if (Has GroupID?) then (yes)
+            :Process Rule GroupBetting;
+            
+            |CTS_DataCenter (MySQL)|
+            :SP: CTS_MatchMonitor_RuleGroupBetting_Process;
+            note right
+                EXEC CTS_MatchMonitor_RuleGroupBetting_Process
+                    @IsLive = 1,
+                    @MatchInfo = '{...}',  -- JSON
+                    @SequenceIDList = '12345679,12345680,12345681,...',
+                    @GroupDetection = '[...]'  -- Association results JSON
+                
+                Logic:
+                -----
+                -- Parse inputs
+                CREATE TEMP TABLE TempMatchInfo ...
+                CREATE TEMP TABLE TempGroupDetection ...
+                
+                -- Join staging data with group detection
+                CREATE TEMP TABLE TempFraudTickets AS
+                SELECT 
+                    s.SequenceID,
+                    s.TransID,
+                    s.CustID,
+                    s.CTSCustID,
+                    s.Amount,
+                    s.Odds,
+                    g.GroupID,
+                    g.AssociationType
+                FROM CTSMatchMonitorStaging s
+                JOIN TempGroupDetection g ON s.CustID = g.CustID
+                WHERE s.SequenceID IN (@SequenceIDList);
+                
+                -- Calculate group statistics
+                CREATE TEMP TABLE TempGroupStats AS
+                SELECT 
+                    GroupID,
+                    COUNT(*) AS TicketCount,
+                    COUNT(DISTINCT CustID) AS CustCount,
+                    SUM(Amount) AS TotalAmount,
+                    AVG(Odds) AS AvgOdds,
+                    GROUP_CONCAT(DISTINCT AssociationType) AS AssociationType
+                FROM TempFraudTickets
+                GROUP BY GroupID;
+                
+                -- Identify tickets needing reprocessing
+                -- (Complex logic based on partial matches, edge cases)
+                CREATE TEMP TABLE TempReprocessTickets AS
+                SELECT ...
+                WHERE ... (specific criteria for Round 2);
+                
+                -- Result Set 1: Complete Matches (for saving)
+                SELECT 
+                    GroupID,
+                    GROUP_CONCAT(TransID) AS TransIDList,
+                    GROUP_CONCAT(CustID) AS CustIDList,
+                    TotalAmount,
+                    AvgOdds,
+                    AssociationType,
+                    'GroupBetting' AS DetectionType
+                FROM TempGroupStats
+                WHERE TicketCount >= 2  -- Minimum group size
+                ORDER BY GroupID;
+                
+                -- Result Set 2: Reprocess Matches (for Round 2)
+                SELECT 
+                    GROUP_CONCAT(SequenceID) AS SequenceIDList,
+                    GROUP_CONCAT(CTSCustID) AS CTSCustIDList,
+                    GROUP_CONCAT(CustID) AS CustIDList
+                FROM TempReprocessTickets
+                GROUP BY ReprocessGroupKey;
+                
+                Returns:
+                --------
+                MatchProcessRuleGroupBettingModel:
+                - CompleteMatches[] (to save to result table)
+                - ReprocessMatches[] (for Round 2)
+            end note
+            
+            |Application|
+            :ProcessResult (Round 1);
+            
+            if (Has ReprocessMatches?) then (yes)
+                :Process Round 2;
+                note right
+                    Same flow as Round 1:
+                    1. Association Detection (refined lists)
+                    2. Process Rule GroupBetting
+                    3. Merge with Round 1 results
+                end note
+                
+                |CTS_DataCenter (MySQL)|
+                :SP: CTS_AssociationDetection_Lv1;
+                note right
+                    With refined customer lists
+                end note
+                
+                |CTS_DataCenter (MySQL)|
+                :SP: CTS_MatchMonitor_RuleGroupBetting_Process;
+                note right
+                    With Round 2 customer lists
+                end note
+                
+                |Application|
+                :ProcessResult (Round 2);
+            endif
+            
+            :Merge Round 1 & Round 2 Results;
+            :Assign Sequential GroupID;
+            
+            :Complete and Save Results;
+            
+            |CTS_DataCenter (MySQL)|
+            :SP: CTS_MatchMonitor_RuleGroupBetting_Complete;
+            note right
+                EXEC CTS_MatchMonitor_RuleGroupBetting_Complete
+                    @IsLive = 1,
+                    @MatchInfo = '{...}',  -- JSON
+                    @MaxSequenceID = 12346678,
+                    @TransGroupJson = '[...]'  -- Merged results JSON
+                
+                Logic:
+                -----
+                -- Parse merged results
+                CREATE TEMP TABLE TempCompleteGroups ...
+                
+                -- Insert into result table
+                INSERT INTO CTSMatchMonitorRuleGroupBetting (
+                    MatchID,
+                    GroupID,
+                    TransIDList,
+                    CustIDList,
+                    AssociationType,
+                    TotalAmount,
+                    TotalOdds,
+                    TicketCount,
+                    CustCount,
+                    DetectionType,
+                    RuleScore,
+                    IsLive,
+                    CreatedDate
+                )
+                SELECT 
+                    @MatchID,
+                    GroupId,
+                    TransIDList,
+                    CustIDList,
+                    AssociationType,
+                    TotalAmount,
+                    TotalOdds,
+                    TicketCount,
+                    CustCount,
+                    'GroupBetting',
+                    CalculateRuleScore(TotalAmount, CustCount, ...) AS RuleScore,
+                    @IsLive,
+                    NOW()
+                FROM TempCompleteGroups;
+                
+                -- Mark staging transactions as processed
+                UPDATE CTSMatchMonitorStaging
+                SET IsProcessed = 1,
+                    ProcessedDate = NOW()
+                WHERE SequenceID IN (
+                    SELECT SequenceID
+                    FROM ... (parse from TransGroupJson)
+                );
+                
+                Table: CTSMatchMonitorRuleGroupBetting
+                Indexes:
+                - PRIMARY KEY (ID)
+                - UNIQUE INDEX idx_result_match_group (MatchID, GroupID, IsLive)
+                - INDEX idx_result_date (CreatedDate)
+                
+                Returns: Success/Failure
+            end note
+            
+            |Application|
+            :Results Saved;
+        else (no)
+            :No groups detected;
+        endif
+    }
+
+repeat while (More matches?) is (yes)
+->no;
+
+|Application|
+:All Matches Processed;
+
+floating note : ALL MATCHES COMPLETE
+
+:Clean Up Old Transactions;
+
+|CTS_DataCenter (MySQL)|
+:SP: CTS_MatchMonitor_RuleGroupBetting_Clean;
+note right
+    EXEC CTS_MatchMonitor_RuleGroupBetting_Clean
+        @IsLive = 1,
+        @MaxSequenceID = 12346678
+    
+    Logic:
+    -----
+    DELETE FROM CTSMatchMonitorStaging
+    WHERE IsLive = @IsLive
+        AND PoolType = 1  -- GroupBetting Pool
+        AND IsProcessed = 1
+        AND SequenceID <= @MaxSequenceID
+        AND ProcessedDate < DATE_SUB(NOW(), INTERVAL 7 DAY);
+    
+    Purpose:
+    --------
+    - Clean up old processed transactions
+    - Keep 7 days for audit/investigation
+    - Prevent table bloat
+    - Maintain performance
+    
+    Deleted Rows: ~thousands per run
+    
+    Index Used:
+    - idx_staging_main (WHERE clause)
+end note
+
+|Application|
+:Phase 2 Complete;
+
+stop
+
+@enduml
+

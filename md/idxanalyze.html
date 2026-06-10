@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CTS Technical Documentation - Flow Charts Homepage</title>
+    <link rel="stylesheet" href="assets/css/styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 CTS Technical Documentation - Flow Charts</h1>
+            <p>Analyze and view processing flows of the Customer Tracking System</p>
+        </div>
+
+        <input type="text" class="search-box" id="searchBox" placeholder="🔍 Search flows...">
+
+        <button class="analyze-button" onclick="window.location.href='analyzer.html'">
+            🤖 Analyze Requirements
+        </button>
+
+        <div id="flowContainer">
+            <!-- Categories will be loaded here -->
+        </div>
+    </div>
+
+    <div class="modal" id="diagramModal">
+        <div class="modal-content">
+            <span class="modal-close" onclick="closeModal()">&times;</span>
+            <div id="modalContent"></div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+</body>
+
+</html>

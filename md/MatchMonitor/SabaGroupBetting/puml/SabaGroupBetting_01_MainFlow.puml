@@ -1,0 +1,281 @@
+@startuml SabaGroupBetting_MainFlow
+!theme plain
+title Match Monitor Saba Group Betting - Main Business Flow (Updated 2025-11-19)
+
+start
+
+floating note : PHASE 1 - STAGING (Shared with all rules)
+
+:Insert Ticket Detail;
+note right
+    **Staging Tables:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - MatchMonitorStagingGroupBettingSabaNonLive
+    
+    **Key Fields:**
+    - SequenceID (auto-increment)
+    - TransID, CustID, CTSCustID
+    - MatchID, ScoreDiff, BettypeID, BetID, Betteam
+    - SportType, LeagueGroupID
+    - Stake, TransDateToSecond
+    - GroupID (initially 0)
+end note
+
+floating note : PHASE 2 - PROCESSING (Saba-Specific)
+
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/matchmonitor/MatchMonitorProcessRuleSabaGroupBettingLive
+    or: /api/matchmonitor/MatchMonitorProcessRuleSabaGroupBettingNonLive
+    Parameter: numberOfThread
+end note
+
+:MatchMonitorJobService.ProcessRuleSabaGroupBetting(isLive, numberOfThread);
+
+:GetMatchRuleSabaGB(isLive);
+:Call SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get(isLive);
+note right
+    **Database:** CTS_DataCenter (MySQL)
+    **SP Name:** CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get
+    
+    **Returns:**
+    - MaxSequenceID (OUT parameter)
+    - CTSCustomerList (for mapping dictionary)
+    - MatchStagingList (grouped matches)
+    
+    **Tables Used:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - MatchMonitorStagingGroupBettingSabaNonLive
+    - MatchMonitorRuleSetting
+    - SystemParameter
+end note
+
+partition "=== CREATE MAPPING DICTIONARY ===" {
+    :Extract CTSCustomerList;
+    note right
+        From SP result:
+        SELECT DISTINCT CustID, CTSCustID
+        FROM MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+        WHERE SequenceID <= MaxSequenceID
+        
+        Example Result:
+        [
+            { CustID: 101, CTSCustID: 5001 },
+            { CustID: 102, CTSCustID: 5002 },
+            { CustID: 103, CTSCustID: 5003 }
+        ]
+    end note
+    
+    :Create MappingCustDictionary;
+    note right
+        **KEY SABA FEATURE!**
+        
+        MappingCustDictionary = CTSCustomerList
+            .Select(x => new { x.CustID, x.CTSCustID })
+            .Distinct()
+            .ToDictionary(x => x.CustID, x => x.CTSCustID);
+        
+        Type: IReadOnlyDictionary<int, int>
+        
+        Example Result:
+        {
+            101: 5001,
+            102: 5002,
+            103: 5003
+        }
+        
+        Purpose:
+        - Map Saba CustID to CTS internal CTSCustID
+        - Used in association detection
+        - Essential for Saba platform integration
+    end note
+    
+    :Dictionary Ready;
+}
+
+:Group Matches;
+note right
+    Group by: MatchID, ScoreDiff, BettypeID, BetID, Betteam
+    Filter by:
+    - TotalStake >= RuleSetting.TotalStake
+    - COUNT(DISTINCT CustID) > 1
+    - SUM(CustStake) >= TotalStake
+end note
+
+if (Has Matches?) then (yes)
+    :Parallel Processing Setup;
+    note right
+        AsParallel()
+        WithDegreeOfParallelism(numberOfThread)
+    end note
+    
+    partition "Process Single Match (Per Thread)" {
+        :Get Process Service Instance;
+        note right
+            _ruleSabaGBService.GetInstanceProcessSabaGBService()
+            Returns: MMRuleSabaGBProcessService
+        end note
+        
+        :PrepareProcess(matchInfo, isLive, mappingCustDictionary);
+        note right
+            **Pass MappingCustDictionary!**
+            
+            This is KEY difference from standard:
+            - Standard: Pass AssociationSettings
+            - Saba: Pass MappingCustDictionary
+        end note
+        
+        partition "=== ROUND 1: Initial Detection ===" {
+            :ProcessRound1();
+            
+            :For each customer group;
+            :DetectAssociation(CTSCustIDList, CustIDList);
+            note right
+                **Simplified Detection for Saba:**
+                
+                var param = new DetectAssociationParamModel {
+                    CTSCustIds = ctsCustIDList,
+                    CustIds = custIDList,
+                    IsDevice = true,           (Always ON)
+                    IsAI = true,               (Always ON)
+                    IsIP = true,               (Always ON)
+                    Is3MatchesLast7Days = true, (Always ON)
+                    MappingCustDictionary = MappingCustDictionary (Saba!)
+                };
+                
+                **No sport-specific configuration!**
+                **No IPLast3Days / LicCustList!**
+            end note
+            
+            if (Has GroupID?) then (yes)
+                :ProcessRuleSabaGB();
+                :Add to MatchProcesses[];
+            endif
+        }
+        
+        partition "=== ROUND 2: Re-processing ===" {
+            :ProcessRound2();
+            
+            if (Has Reprocess Items?) then (yes)
+                :For each reprocess item;
+                :DetectAssociation (refined lists);
+                note right
+                    Same logic as Round 1
+                    With refined customer lists
+                end note
+                
+                if (Has GroupID?) then (yes)
+                    :ProcessRuleSabaGB();
+                    :Set RoundNumber = 2;
+                    :Add to MatchProcesses[];
+                endif
+            endif
+        }
+        
+        partition "=== COMPLETE: Save Results ===" {
+            :Complete(maxSequenceID);
+            
+            :Merge Round 1 and Round 2;
+            :Group by TransIDList;
+            :Assign Sequential GroupID;
+            note right
+                Same logic as standard:
+                - Merge results
+                - Remove duplicates
+                - Assign 1, 2, 3, ...
+            end note
+            
+            if (Has Results?) then (yes)
+                :CompleteTransRuleSabaGB();
+                :Call SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete;
+                note right
+                    **SP Name:** CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete
+                    
+                    **Operations:**
+                    1. INSERT/UPDATE MatchMonitorDetails
+                    2. UPDATE Staging GroupID
+                    3. INSERT MatchMonitor
+                    
+                    **Tables:**
+                    - MatchMonitorDetails (main results)
+                    - MatchMonitor (summary)
+                    - MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+                end note
+                
+                :Mark Staging as Processed;
+                note right
+                    UPDATE MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+                    SET GroupID = TargetGroupID
+                    WHERE TransID IN (TransIDList)
+                end note
+            endif
+        }
+        
+        :WriteLogSentryIfError();
+        :Sleep(100ms);
+    }
+    
+    :Wait for All Threads;
+    
+    :CleanTransRuleSabaGB(isLive, maxSequenceID);
+    :Call SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean;
+    note right
+        **SP Name:** CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean
+        
+        **Clean-up Logic:**
+        - Remove processed transactions
+        - Keep last TimeStep transactions
+        - Update SystemParameter (162 for Live, 163 for NonLive)
+        
+        **Tables:**
+        - MatchMonitorStagingGroupBettingSaba[Live/NonLive]
+        - SystemParameter
+    end note
+    
+else (no)
+    :No matches to process;
+endif
+
+:Return Success;
+
+stop
+
+note right
+    ===================================================
+    SABA GROUP BETTING COMPLETE
+    ===================================================
+    
+    **Key Saba Features:**
+    
+    1. ✅ MappingCustDictionary
+       - Maps Saba CustID to CTS CTSCustID
+       - Created from CTSCustomerList
+       - Passed to association detection
+    
+    2. ✅ Simplified Detection
+       - All criteria always enabled
+       - No sport-specific settings
+       - No IPLast3Days
+    
+    3. ✅ Saba-Specific Tables
+       - MatchMonitorStagingGroupBettingSabaLive
+       - MatchMonitorStagingGroupBettingSabaNonLive
+       - MatchMonitorDetails (Reason = 0)
+    
+    4. ✅ Stored Procedures
+       - CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get
+       - CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete
+       - CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean
+    
+    **Same as Standard:**
+    - 2-round detection
+    - Parallel processing
+    - Merge and complete flow
+    - Clean-up logic
+    
+    **Complexity:**
+    - Simpler than standard (no sport config)
+    - But has unique mapping requirement
+end note
+
+@enduml

@@ -1,0 +1,384 @@
+@startuml ProbationClassification_SP_ProbationPreprocess
+title CTS_GeneralNormalClassification_Probation_Preprocess - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #FF6F00
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_GeneralNormalClassification_Probation_Preprocess
+  **Database**: bodb_VR2Model.wsv_cts (SQL Server)
+  **Timeout**: 300 seconds (5 minutes)
+  **Parameters**: Customer list (comma-separated string)
+  **Called From**: ProbationClassifCriteria
+  **Purpose**: Re-classify customers in probation period
+end note
+
+partition "Input Processing" {
+  :Receive Customer List;
+  note right
+    **Input Format**: Comma-separated CustIDs
+    **Example**: "123456,789012,345678,901234"
+    
+    **Source**: Customers from ProbationScan
+  end note
+
+  :Parse CustID String;
+  note right
+    **SQL Server Parsing**:
+    ```sql
+    -- Split string into rows
+    DECLARE @CustIDs TABLE (CustID BIGINT)
+    
+    INSERT INTO @CustIDs
+    SELECT value
+    FROM STRING_SPLIT(@ListCustId, ',')
+    ```
+    
+    **Result**: Table variable with one CustID per row
+  end note
+
+  :Create #TempProbationCustomers;
+  note right
+    **Temp Table**:
+    - CustID (bigint)
+    - Used for joining with other tables
+    - Improves query performance
+  end note
+}
+
+partition "Get Current Classification" {
+  :Retrieve Current Customer Data;
+  note right
+    **Query**:
+    ```sql
+    SELECT 
+      c.CustID,
+      c.CTSCustID,
+      c.CategoryID AS CurrentCategoryID,
+      c.CategoryName AS CurrentCategoryName,
+      c.ProbationStartDate,
+      c.ProbationEndDate,
+      c.TurnoverRM AS BaselineTurnoverRM,
+      c.WinlossRM AS BaselineWinlossRM,
+      c.BetCount AS BaselineBetCount,
+      c.ActiveDays AS BaselineActiveDays
+    FROM CTSCustomerClassification c
+    WHERE c.CustID IN (SELECT CustID FROM @CustIDs)
+      AND c.ProbationEndDate > GETDATE()
+    ```
+    
+    **Purpose**: Get baseline classification and probation info
+  end note
+
+  :Store in #CurrentClassification;
+}
+
+partition "Calculate Probation Performance" {
+  :Query Customer Transactions;
+  note right
+    **Get Betting Activity During Probation**:
+    ```sql
+    SELECT 
+      c.CustID,
+      SUM(t.TurnoverRM) AS TurnoverDuringProbation,
+      SUM(t.WinlossRM) AS WinlossDuringProbation,
+      COUNT(t.BetID) AS BetCountDuringProbation,
+      COUNT(DISTINCT CAST(t.BetDate AS DATE)) AS ActiveDaysDuringProbation,
+      AVG(t.BetAmount) AS AvgBetSizeDuringProbation,
+      MIN(t.BetDate) AS FirstBetDateDuringProbation,
+      MAX(t.BetDate) AS LastBetDateDuringProbation
+    FROM #CurrentClassification c
+    JOIN CustomerTransaction t 
+      ON c.CustID = t.CustID
+    WHERE t.TransactionDate BETWEEN c.ProbationStartDate AND GETDATE()
+      AND t.BetStatus = 'Settled'  -- Only completed bets
+      AND t.IsVoid = 0             -- Exclude void bets
+    GROUP BY c.CustID
+    ```
+    
+    **Metrics Calculated**:
+    - TurnoverRM: Total betting volume
+    - WinlossRM: Total profit/loss (negative = customer loss)
+    - BetCount: Number of bets placed
+    - ActiveDays: Days with betting activity
+    - AvgBetSize: Average bet amount
+    - Date range: First and last bet
+  end note
+
+  :Store in #ProbationPerformance;
+
+  :Calculate Performance Changes;
+  note right
+    **Compare Baseline vs Probation**:
+    ```sql
+    SELECT 
+      c.*,
+      p.TurnoverDuringProbation,
+      p.WinlossDuringProbation,
+      p.BetCountDuringProbation,
+      p.ActiveDaysDuringProbation,
+      
+      -- Calculate changes (%)
+      CASE 
+        WHEN c.BaselineTurnoverRM > 0 
+        THEN (p.TurnoverDuringProbation - c.BaselineTurnoverRM) 
+             / c.BaselineTurnoverRM * 100
+        ELSE 0 
+      END AS TurnoverChangePercent,
+      
+      CASE 
+        WHEN c.BaselineWinlossRM <> 0 
+        THEN (p.WinlossDuringProbation - c.BaselineWinlossRM) 
+             / ABS(c.BaselineWinlossRM) * 100
+        ELSE 0 
+      END AS WinlossChangePercent,
+      
+      -- Determine improvement/deterioration
+      CASE
+        WHEN p.WinlossDuringProbation > c.BaselineWinlossRM 
+        THEN 'Improved'      -- Less loss or more win
+        WHEN p.WinlossDuringProbation < c.BaselineWinlossRM 
+        THEN 'Deteriorated'  -- More loss or less win
+        ELSE 'Maintained'
+      END AS PerformanceTrend
+    FROM #CurrentClassification c
+    JOIN #ProbationPerformance p ON c.CustID = p.CustID
+    ```
+    
+    **Performance Indicators**:
+    - Improved: Better performance (less loss)
+    - Deteriorated: Worse performance (more loss)
+    - Maintained: Similar performance
+  end note
+
+  :Store in #PerformanceAnalysis;
+}
+
+partition "Determine New Classification" {
+  :Apply Re-Classification Rules;
+  note right
+    **Re-Classification Matrix**:
+    
+    **PA (Problem Account) Customers**:
+    ```sql
+    WHEN CurrentCategoryID = PA AND PerformanceTrend = 'Improved' THEN
+      CASE 
+        WHEN WinlossDuringProbation > -5000  -- Much improved
+        THEN NewCategoryID = Normal
+        WHEN WinlossDuringProbation > -10000  -- Improved
+        THEN NewCategoryID = PotentialPA
+        ELSE NewCategoryID = PA  -- Still problematic
+      END
+    
+    WHEN CurrentCategoryID = PA AND PerformanceTrend = 'Maintained' THEN
+      NewCategoryID = PA  -- No improvement, extend probation
+    
+    WHEN CurrentCategoryID = PA AND PerformanceTrend = 'Deteriorated' THEN
+      NewCategoryID = PA  -- Worse, maintain PA, extend probation
+    ```
+    
+    **PotentialPA Customers**:
+    ```sql
+    WHEN CurrentCategoryID = PotentialPA AND PerformanceTrend = 'Improved' THEN
+      CASE 
+        WHEN WinlossDuringProbation > 0  -- Profitable now
+        THEN NewCategoryID = Normal
+        WHEN WinlossDuringProbation > -3000  -- Small loss
+        THEN NewCategoryID = Normal
+        ELSE NewCategoryID = PotentialPA  -- Still some concern
+      END
+    
+    WHEN CurrentCategoryID = PotentialPA AND PerformanceTrend = 'Deteriorated' THEN
+      CASE 
+        WHEN WinlossDuringProbation < -10000  -- Much worse
+        THEN NewCategoryID = PA
+        ELSE NewCategoryID = PotentialPA  -- Minor decline
+      END
+    ```
+    
+    **Thresholds (Examples)**:
+    - PA → Normal: Winloss > -5,000 RM
+    - PA → PotentialPA: Winloss > -10,000 RM
+    - PotentialPA → Normal: Winloss > -3,000 RM
+    - PotentialPA → PA: Winloss < -10,000 RM
+  end note
+
+  :Calculate New Category;
+  note right
+    ```sql
+    SELECT 
+      pa.*,
+      CASE 
+        -- PA Re-classification
+        WHEN pa.CurrentCategoryID = @PA_CategoryID THEN
+          CASE 
+            WHEN pa.WinlossDuringProbation > -5000 THEN @Normal_CategoryID
+            WHEN pa.WinlossDuringProbation > -10000 THEN @PotentialPA_CategoryID
+            ELSE @PA_CategoryID
+          END
+        
+        -- PotentialPA Re-classification
+        WHEN pa.CurrentCategoryID = @PotentialPA_CategoryID THEN
+          CASE 
+            WHEN pa.WinlossDuringProbation > -3000 THEN @Normal_CategoryID
+            WHEN pa.WinlossDuringProbation < -10000 THEN @PA_CategoryID
+            ELSE @PotentialPA_CategoryID
+          END
+        
+        ELSE pa.CurrentCategoryID  -- No change
+      END AS NewCategoryID
+    FROM #PerformanceAnalysis pa
+    ```
+  end note
+
+  :Determine Probation Action;
+  note right
+    **Probation Actions**:
+    
+    1. **Complete Probation** (NewCategoryID = Normal):
+       - Customer improved to Normal
+       - Clear probation dates
+       - Remove probation status
+    
+    2. **Extend Probation** (NewCategoryID = PA/PotentialPA):
+       - Customer still problematic
+       - Extend ProbationEndDate by 30 days
+       - Continue monitoring
+    
+    3. **Upgrade Severity** (PotentialPA → PA):
+       - Customer deteriorated
+       - Change category to PA
+       - Extend probation
+       - Increase monitoring
+    
+    ```sql
+    NewProbationEndDate = CASE 
+      WHEN NewCategoryID IN (@PA_CategoryID, @PotentialPA_CategoryID)
+      THEN DATEADD(DAY, 30, GETDATE())  -- Extend 30 days
+      ELSE NULL  -- Complete probation
+    END
+    ```
+  end note
+}
+
+partition "Update Classification" {
+  :UPDATE CTSCustomerClassification;
+  note right
+    **Update Query**:
+    ```sql
+    UPDATE c
+    SET 
+      c.CategoryID = pa.NewCategoryID,
+      c.CategoryName = cat.CategoryName,
+      c.TurnoverRM = pa.TurnoverDuringProbation,
+      c.WinlossRM = pa.WinlossDuringProbation,
+      c.BetCount = pa.BetCountDuringProbation,
+      c.ActiveDays = pa.ActiveDaysDuringProbation,
+      c.ProbationEndDate = pa.NewProbationEndDate,
+      c.LastProbationReviewDate = GETDATE(),
+      c.UpdatedDate = GETDATE()
+    FROM CTSCustomerClassification c
+    JOIN #PerformanceAnalysis pa ON c.CustID = pa.CustID
+    JOIN CategoryMaster cat ON cat.CategoryID = pa.NewCategoryID
+    WHERE c.CustID IN (SELECT CustID FROM @CustIDs)
+    ```
+    
+    **Fields Updated**:
+    - CategoryID: New classification
+    - CategoryName: New category name
+    - Turnover/Winloss/BetCount/ActiveDays: Updated metrics
+    - ProbationEndDate: Extended or cleared
+    - LastProbationReviewDate: Current timestamp
+    - UpdatedDate: Current timestamp
+  end note
+
+  :Log Classification Changes;
+  note right
+    **Insert into ClassificationChangeLog**:
+    ```sql
+    INSERT INTO CTSClassificationChangeLog
+    (CustID, OldCategoryID, NewCategoryID, 
+     ChangeReason, ChangeDate, ChangedBy)
+    SELECT 
+      pa.CustID,
+      pa.CurrentCategoryID,
+      pa.NewCategoryID,
+      'Probation Review: ' + pa.PerformanceTrend,
+      GETDATE(),
+      'ProbationClassificationJob'
+    FROM #PerformanceAnalysis pa
+    WHERE pa.CurrentCategoryID <> pa.NewCategoryID
+    ```
+    
+    **Purpose**:
+    - Audit trail of category changes
+    - Performance tracking
+    - Compliance reporting
+  end note
+}
+
+:Return Success;
+note right
+  **Completion**:
+  - All probation customers re-classified
+  - Classification updated in database
+  - Changes logged for audit
+  - Ready for next batch
+end note
+
+note right
+  **Re-Classification Summary**:
+  
+  **Improvement Path** (Downgrade):
+  PA → PotentialPA → Normal
+  - Based on reduced losses
+  - Better betting behavior
+  - Complete probation at Normal
+  
+  **Deterioration Path** (Upgrade):
+  Normal → PotentialPA → PA
+  - Based on increased losses
+  - Worse betting behavior
+  - Extended probation
+  
+  **Key Metrics**:
+  - Turnover: Betting volume
+  - Winloss: Profit/loss (negative = customer loss)
+  - BetCount: Betting frequency
+  - ActiveDays: Betting consistency
+  
+  **Probation Actions**:
+  1. **Complete**: Clear probation (Normal)
+  2. **Extend**: Add 30 days (PA/PotentialPA)
+  3. **Upgrade**: Increase severity (PotentialPA → PA)
+  
+  **Business Logic**:
+  - Focus on customer behavior during probation
+  - Compare baseline vs probation performance
+  - Determine improvement/deterioration
+  - Apply thresholds for category change
+  - Extend or complete probation accordingly
+  
+  **Performance Considerations**:
+  - Complex joins and calculations
+  - 300-second timeout
+  - Batch processing (5000-10000 customers)
+  - Indexed tables for efficiency
+  
+  **Typical Re-Classification Rates**:
+  - 30% Improved (downgrade category)
+  - 50% Maintained (keep category, extend)
+  - 20% Deteriorated (upgrade category)
+end note
+
+stop
+
+@enduml
+

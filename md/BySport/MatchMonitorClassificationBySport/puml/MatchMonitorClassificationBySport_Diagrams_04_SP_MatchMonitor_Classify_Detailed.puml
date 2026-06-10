@@ -1,0 +1,129 @@
+@startuml MatchMonitorClassificationBySport_SP_Classify_Detailed
+!theme plain
+title Match Monitor Classification By Sport - SP Classify Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_MatchMonitor_Classify;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Tables: SystemParameter, MatchMonitor, MatchMonitorDetails
+    CTSCustomer, CustomerCategorySettings
+    CTSCustomerClassification_BySport
+    Parameter: @ip_BatchSize
+end note
+
+:Get MatchID from SystemParameter;
+note right
+    SELECT ParameterValue
+    WHERE ParameterID = 199
+end note
+
+if (MatchID = 0?) then (yes)
+    :Get First Unclassified Match;
+    note right
+        SELECT MatchID
+        WHERE SportType = 1
+          AND LeagueGroupID = 42
+          AND ClassifyStatusBySport = 2
+        ORDER BY KickOffTime ASC
+        LIMIT 1
+    end note
+    
+    :Update SystemParameter;
+    note right
+        UPDATE SystemParameter
+        SET ParameterValue = MatchID
+        WHERE ParameterID = 199
+    end note
+else (no)
+    :Use Existing MatchID;
+endif
+
+:Determine SportGroup;
+note right
+    SELECT CASE
+      WHEN SportType = 1 AND LeagueGroupID = 42
+      THEN 145 ELSE 0 END
+    WHERE MatchID = @MatchID
+      AND ClassifyStatusBySport = 2
+end note
+
+:Create Temp Tables;
+note right
+    Temp_MatchMonitorDetailsCust:
+    - CustID, MMDetailsID
+    - Reason, MatchID, NoOfCust
+    
+    Temp_Cust:
+    - CustID, MMDetailsID, MatchID
+    - CTSCustID, RoleID
+    - SubscriberID, IsLicensee
+    
+    Temp_ExcludePACategoryID:
+    - CategoryID
+end note
+
+:Get Excluded PA Categories;
+note right
+    SELECT CategoryID
+    WHERE ExcludedFromClassifyMM = 1
+    INSERT INTO Temp_ExcludePACategoryID
+end note
+
+:Get MatchMonitorDetails Customers;
+note right
+    SELECT mmd.ID, mmd.HighStakeLicCustList, mmd.MatchID
+    WHERE mmd.MatchID = @MatchID
+      AND mmd.Reason = 0
+      AND mmd.ClassifyStatusBySport = 0
+    LIMIT @ip_BatchSize
+end note
+
+:Parse HighStakeLicCustList (JSON);
+note right
+    INSERT INTO Temp_MatchMonitorDetailsCust
+    Parse comma-separated CustIDs
+end note
+
+:Get CTSCustomer Info;
+note right
+    LEFT JOIN CTSCustomer
+    ON CustID = CTSCustomer.CustID
+    INSERT INTO Temp_Cust
+    (CustID, CTSCustID, RoleID, SubscriberID, IsLicensee)
+end note
+
+:Filter Out Existing PA Classifications;
+note right
+    NOT EXISTS
+    (SELECT 1 FROM CCBySport
+     WHERE CustID = Temp_Cust.CustID
+       AND sportID = @SportGroup
+       AND CategoryID IN Temp_ExcludePACategoryID)
+end note
+
+:Return Results;
+note right
+    SELECT DISTINCT
+    CustID, MatchID, CTSCustID
+    RoleID, SubscriberID, IsLicensee
+    CategoryID (SystemDetectGB)
+    CategoryGroup (SystemDetectGB)
+    SportGroup
+end note
+
+:Return MMDetailsIDList;
+note right
+    SELECT GROUP_CONCAT(DISTINCT MMDetailsID)
+    AS MMDetailsIDList
+end note
+
+:Return MatchID;
+note right
+    SELECT @MatchID AS MatchID
+end note
+
+stop
+
+@enduml
+

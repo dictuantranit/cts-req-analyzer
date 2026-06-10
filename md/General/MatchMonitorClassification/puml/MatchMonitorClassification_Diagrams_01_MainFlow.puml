@@ -1,0 +1,223 @@
+@startuml MatchMonitorClassification_MainFlow
+title Match Monitor Classification (General) - Main Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+
+|Job 1: Update Status Match Monitor|
+start
+:Trigger: Periodic (Every 30 mins);
+note right
+  **Purpose**: Maintain match status
+  **Endpoint**: /api/classificationJobs/
+                UpdateStatusMatchMonitor
+end note
+
+:Start Service;
+
+|DataAccess|
+:GetMatchMonitor();
+note right
+  **SP**: CTS_DC_CustClassification_
+         MatchMonitor_Get
+  **Returns**: List<int> MatchIDs
+  **Logic**: Get unfinished matches
+end note
+
+:Return MatchIDs[];
+
+|Service|
+if (Has MatchIDs?) then (yes)
+  :Convert to comma-separated string;
+  note right
+    Example: "12345,67890,11111"
+  end note
+  
+  |DataAccess|
+  :GetMatchInfosByIDs(matchIDs);
+  note right
+    **SP**: CTS_MatchInfo_Get
+    **Database**: MainDB (SQL Server)
+    **Returns**: MatchesInfosEntity[]
+    - MatchID
+    - EventStatus (Pre-match/Live/Closed)
+    - HomeName, AwayName
+  end note
+  
+  :Return Match Infos[];
+  
+  |Service|
+  if (Has Match Infos?) then (yes)
+    :Extract MatchStatusModel[];
+    note right
+      **Model**:
+      - MatchID
+      - EventStatus
+    end note
+    
+    |DataAccess|
+    :UpdateStatusMatchMonitor(matchStatuses);
+    note right
+      **SP**: CTS_DC_CustClassification_
+             MatchMonitor_UpdateMatch
+      **Input**: JSON of match statuses
+      **Update**: EventStatus for each match
+    end note
+  endif
+endif
+
+|Job 1|
+:Complete;
+stop
+
+|Job 2: Classify Match Monitor|
+start
+:Trigger: Every 5 minutes;
+note right
+  **Purpose**: Detect fraud & classify customers
+  **Endpoint**: /api/classificationJobs/
+                ClassifyMatchMonitor
+  **Batch Size**: 500 (fixed)
+end note
+
+:Start Service;
+
+|DataAccess|
+:ClassifyMatchMonitor();
+note right
+  **SP**: CTS_DC_CustClassification_
+         MatchMonitor_Classify
+  **Returns**: 3 result sets
+  1. ClassifyGBMMCustInfosEntity[]
+  2. MMDetailIDList (string)
+  3. MatchID (int?)
+  
+  **Logic**: 
+  - Select ONE match (FIFO)
+  - Run detection rules
+  - Return fraud tickets
+end note
+
+:Return ClassifyGBMatchMonitorModel;
+note right
+  **Model Contains**:
+  - CustInfos[] (customers to classify)
+  - MMDetailIDList (fraud ticket IDs)
+  - MatchID (current match)
+end note
+
+|Service|
+if (Has CustInfos?) then (yes)
+  :Convert to InsertProblemAccountEntity[];
+  note right
+    **Entity Fields**:
+    - CustID
+    - SportGroupID
+    - CategoryID (CC type)
+    - Reason
+    - FunctionId: ClassifyGBMatchMonitor
+  end note
+  
+  partition "Insert Problem Account" {
+    |ProblemAccountServices|
+    :InsertProblemAccountPackage();
+    note right
+      **Process**:
+      1. Validate customers
+      2. Insert to CTSCustomerClassification
+      3. Update CC category
+      4. Mark as PA
+      
+      **FunctionId**: ClassifyGBMatchMonitor
+      **CCInputFlow**: InsertPACategory
+      **Returns**: Inserted CustIDs
+    end note
+    
+    :Return CustIDs[];
+  }
+  
+  partition "Push to External" {
+    |CustClassToMainDBService|
+    :PushExternalProblemAcountPackage(CustIDs);
+    note right
+      **Push Config**:
+      - RoleGroup: Member
+      - ExternalBatchSize: 500
+      - IsUpdateDangerToMainDB: true
+      - ServiceName: "Match Monitor Classication"
+      
+      **Process**:
+      1. Batch CustIDs (500 per batch)
+      2. Push to MainDB
+      3. Sync customer classification
+    end note
+  }
+endif
+
+|Service|
+:ClassifyMatchMonitorCompleted(model);
+note right
+  **Mark as Completed**:
+  - MatchID (from model)
+  - MMDetailIDList (fraud tickets)
+end note
+
+|DataAccess|
+if (Has MatchID?) then (yes)
+  :ClassifyMatchMonitorCompleted(matchID, mmDetailIDs);
+  note right
+    **SP**: CTS_DC_CustClassification_
+           MatchMonitor_Completed
+    **Input**:
+    - ip_MatchID
+    - ip_MMDetailsIDList (comma-separated)
+    
+    **Update**: IsProcessed = 1 for processed tickets
+  end note
+endif
+
+|Job 2|
+:Complete;
+note right
+  **Job completes after processing ONE match**:
+  - Next run will pick next match in queue
+  - FIFO order maintained
+  - Failed matches stay in queue for retry
+end note
+
+stop
+
+note right
+  **Key Characteristics**:
+  
+  **Job 1 (Update Status)**:
+  - Maintenance job
+  - Updates all unfinished matches
+  - Runs less frequently (30 mins)
+  - No classification logic
+  
+  **Job 2 (Classify)** ⭐:
+  - Main detection job
+  - Processes ONE match per run
+  - Runs frequently (5 mins)
+  - Full classification & external push
+  
+  **Differences from BySport**:
+  - General: One match at a time
+  - BySport: Multiple matches per run
+  - General: Has status update job
+  - BySport: No status update
+  
+  **Processing**:
+  - FIFO Queue (First In, First Out)
+  - Automatic retry for failures
+  - Push to MainDB included
+  - Batch size fixed at 500
+end note
+
+@enduml
+

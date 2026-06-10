@@ -1,0 +1,222 @@
+@startuml DailyProblemClassificationBySport_Sequence
+!theme plain
+title Daily Problem Classification By Sport - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationBySportJob\nController" as Controller
+participant "DailyProblemClassificationBySport\nJobService" as JobService
+participant "DailyProblemClassificationBySport\nService" as Service
+participant "ProblemWLClassificationBySport\nDataAccess" as DataAccess
+participant "ProblemAccountBySport\nService" as PAService
+participant "ProblemAccountBySport\nDataAccess" as PADataAccess
+participant "ProblemWLClassificationBySport\nService" as WLService
+participant "CustClassToMainDB\nService" as MainDBService
+database "MySQL\nCTS_DataCenter" as DB
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "Main Database\n(SQL Server)" as MainDB
+
+Scheduler -> Controller: POST /api/classificationBySportJobs/ScanDailyProblemClassiciationBySport\nbatchInternalSize, batchExternalSize
+activate Controller
+
+Controller -> JobService: Execute(batchInternalSize, batchExternalSize)
+activate JobService
+
+loop While has more customers in queue
+    JobService -> Service: Start()
+    activate Service
+    Service -> Service: Initialize PACustomers list
+    Service --> JobService: IDailyProblemClassificationBySportService
+    deactivate Service
+    
+    JobService -> Service: GetDailyPAFromQueue(batchInternalSize)
+    activate Service
+    
+    Service -> DataAccess: GetPADailyFromQueue(batchSize)
+    activate DataAccess
+    
+    DataAccess -> DataAccess: Create PADailyScanFromQueueBySportGetCriteria\nSet BatchSize
+    DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScanPA_GetFromQueue\n@ip_BatchSize
+    activate DB
+    note right of DB
+        Stored Procedure:
+        - Get LastScannedTime from SystemParameter (ID=200)
+        - Add 24 hours
+        - Get from DailyPAQueue
+        - Filter by FlowPADailyScan = 1
+        - Order by ID ASC, Limit batchSize
+        Returns: CustID, SportGroup
+    end note
+    DB --> DataAccess: ResultSet: ProblemAccountInfoFromDailyQueueEntity[]
+    deactivate DB
+    
+    DataAccess --> Service: IEnumerable<ProblemAccountInfoFromDailyQueueModel>
+    deactivate DataAccess
+    
+    Service --> JobService: IEnumerable<ProblemAccountInfoFromDailyQueueModel>
+    deactivate Service
+    
+    JobService -> Service: GetProblemAccountLosingClassification(BySport_FunctionId.ProblemDailyJob)
+    activate Service
+    
+    Service -> PAService: GetPALosingBySport(PACustomers, functionId)
+    activate PAService
+    
+    PAService -> PADataAccess: GetPALosingBySport(custInfosJson, functionId)
+    activate PADataAccess
+    
+    PADataAccess -> VR2DB: EXEC CTS_ProblemAccountsClassification_BySport_Daily\n@ListCustInfo (JSON), @FunctionId = 12
+    activate VR2DB
+    note right of VR2DB
+        Get losing performance:
+        - Parse JSON customer list
+        - Get accumulated data from bodb_dwrs
+        - Calculate WinlossStatus:
+          * LOSING (0): WinlossRM < -10000
+          * KEEPSTATE (1): -10000 <= WinlossRM < -5000
+          * WINNING (2): WinlossRM >= -5000
+        Returns: ProblemAccountLosingBySportEntity[]
+    end note
+    VR2DB --> PADataAccess: ProblemAccountLosingBySportEntity[]
+    deactivate VR2DB
+    
+    PADataAccess --> PAService: ProblemAccountLosingBySportEntity[]
+    deactivate PADataAccess
+    
+    PAService --> Service: ProblemAccountLosingBySportEntity[]
+    deactivate PAService
+    
+    Service --> JobService: ProblemAccountLosingBySportEntity[]
+    deactivate Service
+    
+    alt Has PA Classification Data (IsNotNullOrEmpty())
+        JobService -> JobService: Chunk by batchExternalSize
+        
+        loop For each batch
+            JobService -> Service: GetInstanceProblemWLClassificationBySportService()
+            activate Service
+            Service --> JobService: IProblemWLClassificationBySportService
+            deactivate Service
+            
+            JobService -> WLService: InsertPAWLClassificationBySport(paBatch)
+            activate WLService
+            
+            WLService -> WLService: Serialize to JSON
+            WLService -> DataAccess: InsertPAWLPerformanceBySport(paJson)
+            activate DataAccess
+            
+            DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScanPA_Insert\n@ip_ProblemAccount (JSON)
+            activate DB
+            note right of DB
+                Stored Procedure:
+                - Parse JSON with WinlossStatus, TurnoverRM, etc.
+                - Get current classification
+                - Determine IsDataChanged:
+                  * LOSING + PA: Update
+                  * LOSING + Probation: No Change
+                  * WINNING + PA: No Change
+                  * WINNING + Probation: Update
+                - Update CTSCustomerClassification_BySport if changed
+                - Insert into History and Log
+                Returns: InsertPAProbationBySportResultEntity[]
+            end note
+            DB --> DataAccess: ResultSet: InsertPAProbationBySportResultEntity[]
+            deactivate DB
+            
+            DataAccess --> WLService: InsertPABySportResultModel[]
+            deactivate DataAccess
+            
+            WLService --> JobService: IProblemWLClassificationBySportService
+            deactivate WLService
+            
+            JobService -> WLService: PushCCBySportToExternal(serviceName, batchExternalSize)
+            activate WLService
+            
+            WLService -> WLService: Get distinct customers from PAWLs
+            WLService -> MainDBService: PushCCBySportToMainDB(custs, serviceName, batchExternalSize)
+            activate MainDBService
+            
+            MainDBService -> MainDBService: Chunk customers by batchExternalSize
+            MainDBService -> MainDBService: GetCustomerClassificationBySports(custs)
+            MainDBService -> DB: SELECT CustomerClassification_BySport\nWHERE (CustID, SportID) IN (...)
+            activate DB
+            DB --> MainDBService: GetCustomerClassificationBySportEntity[]
+            deactivate DB
+            
+            MainDBService -> MainDBService: RetryPushCCBySportToMainDB(ccBySports, retryTime=3, serviceName)
+            loop Retry up to 3 times
+                MainDBService -> MainDB: EXEC UpdateCustomerClassificationBySport\n@CustClassification (JSON)
+                activate MainDB
+                note right of MainDB
+                    Update Main Database
+                    Customer Classification By Sport
+                end note
+                MainDB --> MainDBService: Result (ErrorCode, ErrorMsg)
+                deactivate MainDB
+                
+                alt Success (ErrorCode = 0)
+                    MainDBService -> MainDBService: Break loop
+                else Failure (ErrorCode != 0)
+                    MainDBService -> MainDBService: Retry
+                end
+            end
+            
+            MainDBService --> WLService: bool (success)
+            deactivate MainDBService
+            
+            WLService --> JobService: bool (success)
+            deactivate WLService
+            
+            alt Push Failed
+                JobService -> JobService: Return false (stop processing)
+            end
+        end
+        
+        JobService -> Service: UpdateComplete()
+        activate Service
+        
+        Service -> Service: Serialize PACustomers to JSON
+        Service -> DataAccess: CompletePADailyFromQueue(completeCustInfos)
+        activate DataAccess
+        
+        DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScanPA_Complete\n@ip_CustInfoList (JSON)
+        activate DB
+        note right of DB
+            Update:
+            - Parse JSON customer list
+            - Get LastScannedTime from SystemParameter (ID=200)
+            - Add 24 hours
+            - Delete from DailyPAQueue
+            - If no customers: Update SystemParameter
+        end note
+        DB --> DataAccess: Success
+        deactivate DB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service --> JobService: bool (has more customers)
+        deactivate Service
+    else No PA Classification Data
+        JobService -> Service: UpdateComplete()
+        activate Service
+        Service -> DataAccess: CompletePADailyFromQueue("")
+        activate DataAccess
+        DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScanPA_Complete\n@ip_CustInfoList = ""
+        activate DB
+        DB --> DataAccess: Success (Update SystemParameter only)
+        deactivate DB
+        DataAccess --> Service: void
+        deactivate DataAccess
+        Service --> JobService: bool (false - no more customers)
+        deactivate Service
+    end
+end
+
+JobService --> Controller: Task<bool> (true/false)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true/false }
+deactivate Controller
+
+@enduml
+

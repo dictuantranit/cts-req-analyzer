@@ -1,0 +1,249 @@
+@startuml ProbationClassification_SP_GetProbationScan
+title CTS_DC_CustClassification_ProbationScan_Get - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E8F5E9
+skinparam activityBorderColor #4CAF50
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_CustClassification_ProbationScan_Get
+  **Database**: CTS_DataCenter.ctsService (MySQL)
+  **Timeout**: 300 seconds (5 minutes)
+  **Called From**: ProbationScanningGetCriteria
+end note
+
+partition "Input Parameters" {
+  :Receive @ip_NoOfRecord (int);
+  note right
+    **Batch Size**: Number of customers to retrieve
+    **Typical Value**: 5000-10000
+    **Purpose**: Limit result set size
+  end note
+}
+
+partition "Get Pagination State" {
+  :Read System Parameters;
+  note right
+    **Get Current Position**:
+    ```sql
+    SELECT Value INTO @LastCustID
+    FROM CTS_SystemParameter
+    WHERE ParameterKey = 'DailyProbation_LastCustID'
+    
+    SELECT Value INTO @LastCategoryID
+    FROM CTS_SystemParameter
+    WHERE ParameterKey = 'DailyProbation_LastCategoryID'
+    ```
+    
+    **Initial State** (first run):
+    - @LastCustID = 0
+    - @LastCategoryID = 0
+    
+    **Subsequent Runs**:
+    - Start from last processed position
+    - Resume processing seamlessly
+  end note
+
+  :Set @LastCustID and @LastCategoryID;
+}
+
+partition "Query Probation Customers" {
+  :SELECT from CTSCustomerClassification;
+  note right
+    **Query**:
+    ```sql
+    SELECT 
+      CustID,
+      SportGroupID
+    FROM CTSCustomerClassification
+    WHERE 1=1
+      AND ProbationEndDate > NOW()  -- Still in probation
+      AND CustID > @LastCustID      -- Pagination
+    ORDER BY CustID, CategoryID     -- Consistent ordering
+    LIMIT @ip_NoOfRecord            -- Batch size
+    ```
+    
+    **Filter Conditions**:
+    1. **ProbationEndDate > NOW()**:
+       - Customer still in probation period
+       - Not yet completed probation
+       - Active for re-classification
+    
+    2. **CustID > @LastCustID**:
+       - Pagination condition
+       - Skip already processed customers
+       - Start from last position + 1
+    
+    **Ordering**:
+    - PRIMARY: CustID (ascending)
+    - SECONDARY: CategoryID (ascending)
+    - Ensures consistent pagination
+    - Prevents skipping or duplicates
+    
+    **Limit**:
+    - Batch size (@ip_NoOfRecord)
+    - Memory-efficient processing
+    - Balance performance vs throughput
+  end note
+
+  :Build Result Set;
+  note right
+    **Result Columns**:
+    - CustId (long): Customer identifier
+    - SportGroupId (int): Sport classification
+    
+    **Usage**:
+    - Input to probation re-classification
+    - Identifies customers to process
+  end note
+}
+
+partition "Capture Pagination State" {
+  if (Result set has data?) then (yes)
+    :Get Last CustID from result;
+    :Get Last CategoryID from result;
+    note right
+      **Extract Last Values**:
+      ```sql
+      SELECT 
+        MAX(CustID) INTO @op_LastCustID,
+        MAX(CategoryID) INTO @op_LastCategoryID
+      FROM ResultSet
+      ```
+      
+      **Purpose**:
+      - Track progress for next batch
+      - Enable resumable processing
+      - Output parameters for caller
+    end note
+  else (no)
+    :Set @op_LastCustID = 0;
+    :Set @op_LastCategoryID = 0;
+    note right
+      **Empty Result**:
+      - All probation customers processed
+      - Reset pagination state
+      - Signal completion
+    end note
+  endif
+
+  :Set Output Parameters;
+  note right
+    **Output Parameters**:
+    - @op_LastCustID (long)
+    - @op_LastCategoryID (int)
+    
+    **These values will be**:
+    - Stored in system parameters
+    - Used in next iteration/job run
+    - Enable pagination across runs
+  end note
+}
+
+partition "Return Results" {
+  :Return ProbationEntity[];
+  note right
+    **Return Type**: List<ProbationEntity>
+    
+    **Entity Structure**:
+    - CustId (long)
+    - SportGroupId (int)
+    
+    **Count**: 0 to @ip_NoOfRecord
+    
+    **Empty Result Indicates**:
+    - All probation customers processed
+    - Job can complete
+  end note
+}
+
+:Log Execution;
+note right
+  **Logging**:
+  - Customer count returned
+  - LastCustID position
+  - LastCategoryID position
+  - Query execution time
+  - Any errors/warnings
+end note
+
+if (Result count = 0?) then (yes)
+  :Signal completion;
+  note right
+    **No more probation customers**:
+    - All processed
+    - Job will exit do-while loop
+    - Success completion
+  end note
+else (no)
+  :More customers to process;
+  note right
+    **Continue processing**:
+    - Returned customers will be re-classified
+    - Next iteration will fetch more
+    - Loop continues
+  end note
+endif
+
+note right
+  **Pagination Logic**:
+  
+  **First Iteration**:
+  - @LastCustID = 0
+  - @LastCategoryID = 0
+  - Get first batch (TOP @ip_NoOfRecord)
+  - Return @op_LastCustID = MAX(CustID) from result
+  
+  **Subsequent Iterations**:
+  - @LastCustID = @op_LastCustID (from previous)
+  - @LastCategoryID = @op_LastCategoryID (from previous)
+  - Get next batch (CustID > @LastCustID)
+  - Return new @op_LastCustID
+  
+  **Last Iteration**:
+  - Returns < @ip_NoOfRecord customers (partial batch)
+  - Or returns 0 customers (all done)
+  - @op_LastCustID set accordingly
+  
+  **Advantages**:
+  1. **Resumable**: Can resume after interruption
+  2. **No Duplicates**: CustID > @LastCustID prevents re-processing
+  3. **Memory Efficient**: Batch processing
+  4. **Consistent**: ORDER BY ensures reliable pagination
+  5. **Persistent**: System parameters survive restarts
+  
+  **Index Requirements**:
+  ```sql
+  CREATE INDEX IX_Probation_Scan 
+  ON CTSCustomerClassification (ProbationEndDate, CustID, CategoryID)
+  ```
+  - Fast filtering on ProbationEndDate
+  - Efficient pagination on CustID
+  - Secondary ordering on CategoryID
+  
+  **Probation Period Check**:
+  - ProbationEndDate > NOW(): Still in probation
+  - ProbationEndDate <= NOW(): Probation completed
+  - ProbationEndDate IS NULL: No probation
+  
+  **Typical Batch Sizes**:
+  - Small: 1000 (conservative, slower)
+  - Medium: 5000 (balanced)
+  - Large: 10000 (aggressive, faster but more memory)
+  
+  **Performance**:
+  - Query time: < 1 second (with proper indexes)
+  - Total job time: Depends on probation customer count
+  - Example: 50,000 customers ÷ 5,000 batch = 10 iterations
+end note
+
+stop
+
+@enduml
+

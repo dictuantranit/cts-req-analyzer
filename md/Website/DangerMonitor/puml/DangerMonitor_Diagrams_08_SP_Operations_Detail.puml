@@ -1,0 +1,232 @@
+@startuml DangerMonitor_SP_Operations_Detail
+!theme plain
+title Danger Monitor - Stored Procedure Operations Detail
+
+skinparam activity {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+start
+
+:User Request via Criteria;
+
+partition "CTS_MatchTicketInfo_Get" {
+    :Create Temp Tables;
+    note right
+        #tmpBetType
+        #tmpCustomer
+        #tmpUsername
+        #tmpLeagueGroup
+        #tmpMatchSum
+        #tmpMatchInfo
+    end note
+    
+    :Parse Input Parameters;
+    note right
+        - Parse @BettypeList (JSON)
+        - Parse @UserNameList
+        - Parse @LeagueGroupList
+        - Parse @MatchSection
+    end note
+    
+    :INSERT INTO Temp Tables;
+    note right
+        INSERT INTO #tmpBetType
+        INSERT INTO #tmpCustomer
+        INSERT INTO #tmpUsername
+        INSERT INTO #tmpLeagueGroup
+    end note
+    
+    :SELECT FROM Main Tables;
+    note right
+        **Database:** bodb02.dbo
+        **Tables:**
+        - Match
+        - bettrans
+        - Customer
+    end note
+    
+    :SELECT Match Info;
+    note right
+        **Table:** bodb02.dbo.Match
+        **Query:**
+        SELECT FROM Match
+        WHERE EventDate BETWEEN @FromDate AND @ToDate
+        AND SportType IN (@SportList)
+        AND LeagueGroupID IN (@LeagueGroupList)
+    end note
+    
+    :SELECT Customer IDs;
+    note right
+        **Table:** bodb02.dbo.Customer
+        **Query:**
+        SELECT CustId FROM Customer
+        WHERE UserName IN (@UserNameList)
+    end note
+    
+    :SELECT Bet Transactions;
+    note right
+        **Table:** bodb02.dbo.bettrans
+        **Query:**
+        SELECT FROM bettrans
+        JOIN #tmpCustomer ON CustId
+        JOIN #tmpMatchInfo ON MatchId
+        JOIN #tmpBetType ON Bettype
+        WHERE Stake >= @UserAmount
+        WITH(NOLOCK)
+    end note
+    
+    :Aggregate Results;
+    note right
+        GROUP BY MatchId, Bettype, BetId
+        SUM(Stake) as TotalAmount
+        COUNT(*) as TotalTicket
+        Separate Home/Away amounts
+    end note
+    
+    :INSERT INTO #tmpMatchSum;
+    
+    :SELECT Final Results;
+    note right
+        SELECT FROM #tmpMatchSum
+        JOIN #tmpMatchInfo
+        Return aggregated match data
+    end note
+}
+
+partition "CTS_MatchTicketInfo_Associations_Get" {
+    :Parse Association JSON;
+    note right
+        @AssociationsList contains:
+        - RootCustID
+        - CustIDAssociations (comma-separated)
+    end note
+    
+    :Create Association Temp Table;
+    note right
+        #tmpMatchSum_Group
+        with RootCustID column
+    end note
+    
+    :SELECT WITH Association Filter;
+    note right
+        **Table:** bodb02.dbo.bettrans
+        **Query:**
+        SELECT FROM bettrans
+        WHERE CustId IN (
+          SELECT CustID FROM Association List
+        )
+        AND MatchId IN (Filtered Matches)
+    end note
+    
+    :GROUP BY RootCustID;
+    note right
+        Aggregate by Association Groups
+        Separate by Root User
+    end note
+    
+    :Return Grouped Results;
+}
+
+partition "CTS_MatchMonitor_Details_GetFilter" {
+    :SELECT Filter Options;
+    note right
+        **Table:** bodb02.dbo.Match
+        **Query:**
+        SELECT DISTINCT
+        - EventDate ranges
+        - Bettype options
+        - Market options
+        - Customer Class options
+        FROM Match
+        WHERE MatchID = @MatchID
+    end note
+}
+
+partition "CTS_MatchMonitor_Details_GetTicket" {
+    :Create Temp Tables;
+    note right
+        #tmpBetType
+        #tmpCustomer
+        #tmpMatchInfo
+    end note
+    
+    :SELECT Ticket Details;
+    note right
+        **Database:** bodb02.dbo
+        **Tables Used:**
+        - bettrans
+        - Match
+        - Customer
+        - Exchange
+    end note
+    
+    :SELECT FROM bettrans;
+    note right
+        **Table:** bodb02.dbo.bettrans
+        **Query:**
+        SELECT FROM bettrans
+        WHERE MatchID = @MatchID
+        AND BettypeID = @BettypeID
+        AND BetID = @BetID
+        AND TransDate BETWEEN @FromTransDate AND @ToTransDate
+        WITH(NOLOCK)
+    end note
+    
+    :SELECT FROM Match;
+    note right
+        **Table:** bodb02.dbo.Match
+        **Query:**
+        SELECT FROM Match
+        WHERE MatchID = @MatchID
+    end note
+    
+    :SELECT FROM Customer;
+    note right
+        **Table:** bodb02.dbo.Customer
+        **Query:**
+        SELECT FROM Customer
+        WHERE CustId IN (Transaction CustIds)
+    end note
+    
+    :SELECT FROM Exchange;
+    note right
+        **Table:** bodb02.dbo.Exchange
+        **Query:**
+        SELECT CurrencyName FROM Exchange
+        WHERE CurrencyID = Customer.CurrencyID
+    end note
+    
+    :JOIN All Tables;
+    note right
+        bettrans JOIN Match ON MatchId
+        bettrans JOIN Customer ON CustId
+        Customer JOIN Exchange ON CurrencyID
+    end note
+    
+    :Apply Additional Filters;
+    note right
+        Filter by @ListDanger (JSON)
+        Filter by @ListStatus
+        Filter by @ListCustomerClass
+        Filter by @ListReason
+        Filter by @ListAGroup, @ListMGroup
+        Filter by @CustAmountRM
+    end note
+    
+    :Return Ticket Details;
+}
+
+:Map Results to Entities;
+:Return to Service Layer;
+
+stop
+
+@enduml
+

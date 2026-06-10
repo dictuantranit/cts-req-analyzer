@@ -1,0 +1,112 @@
+@startuml DailyProblemClassificationBySport_MainFlow
+!theme plain
+title Daily Problem Classification By Sport - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationBySportJobs/ScanDailyProblemClassiciationBySport
+    Parameters: batchInternalSize, batchExternalSize
+end note
+
+:DailyProblemClassificationBySportJobService.Execute(batchInternalSize, batchExternalSize);
+
+repeat
+    :Start();
+      :Initialize PACustomers list;
+    
+    :GetDailyPAFromQueue(batchInternalSize);
+      :Call CTS_DC_CustClassification_BySport_DailyScanPA_GetFromQueue [SP];
+      note right
+          Parameters:
+          - ip_BatchSize
+          Logic:
+          - Get LastScannedTime from SystemParameter (ParameterID = 200)
+          - Add 24 hours to LastScannedTime
+          - Get customers from DailyPAQueue
+          - Filter by FlowPADailyScan = 1
+          - Order by ID ASC
+          - Limit by batchSize
+          Returns:
+          - CustID, SportGroup
+      end note
+    
+    :GetProblemAccountLosingClassification(BySport_FunctionId.ProblemDailyJob);
+      :GetPALosingBySport();
+        :Call CTS_ProblemAccountsClassification_BySport_Daily [SP];
+        note right
+            Parameters:
+            - @ListCustInfo (JSON)
+            - @FunctionId = 12 (ProblemDailyJob)
+            Logic:
+            - Parse JSON customer list
+            - Get accumulated data from bodb_dwrs
+            - Calculate WinlossStatus:
+              * LOSING (0): WinlossRM < -10000
+              * KEEPSTATE (1): -10000 <= WinlossRM < -5000
+              * WINNING (2): WinlossRM >= -5000
+            Returns:
+            - CustID, SportGroup
+            - WinlossStatus, TurnoverRM, WinlossRM
+            - BetCount, ActiveDays
+        end note
+    
+    if (Has PA Classification Data?) then (yes)
+      :Chunk by batchExternalSize;
+      
+      repeat :For each batch
+        :InsertPAWLClassificationBySport(paBatch);
+          :Call CTS_DC_CustClassification_BySport_DailyScanPA_Insert [SP];
+          note right
+              Parameters:
+              - ip_ProblemAccount (JSON)
+              Logic:
+              - Parse JSON with WinlossStatus, TurnoverRM, etc.
+              - Get current classification from CTSCustomerClassification_BySport
+              - Determine if data changed based on WinlossStatus:
+                * LOSING + PA: Update (IsDataChanged = 1)
+                * LOSING + Probation: No Change (IsDataChanged = 0)
+                * WINNING + PA: No Change (IsDataChanged = 0)
+                * WINNING + Probation: Update (IsDataChanged = 1)
+              - Update classification if IsDataChanged = 1
+              - Insert into History and Log tables
+              Returns:
+              - CustID, SportGroup (only changed records)
+          end note
+        
+        :PushCCBySportToExternal(serviceName, batchExternalSize);
+          :GetCustomerClassificationBySports();
+          :RetryPushCCBySportToMainDB();
+            :UpdateCustomerClassificationBySport [MainDB SP];
+            note right
+                Push to Main Database
+                Retry up to 3 times
+            end note
+      repeat while (More batches?)
+    else (no)
+      note right
+        No PA classification data
+      end note
+    endif
+    
+    :UpdateComplete();
+      :Call CTS_DC_CustClassification_BySport_DailyScanPA_Complete [SP];
+      note right
+          Parameters:
+          - ip_CustInfoList (JSON)
+          Logic:
+          - Parse JSON customer list
+          - Get LastScannedTime from SystemParameter (ParameterID = 200)
+          - Add 24 hours
+          - Delete processed customers from DailyPAQueue
+          - If no customers: Update SystemParameter with new LastScannedTime
+      end note
+    
+repeat while (Has more customers in queue?) is (yes)
+->no;
+
+:Return Success;
+stop
+
+@enduml
+

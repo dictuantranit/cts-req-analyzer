@@ -1,0 +1,150 @@
+@startuml NormalAccountClassificationBySport_SP_Classify_Detailed
+!theme plain
+title Normal Account Classification By Sport - SP Classify Detailed Flow
+
+start
+:CTS_BySportNormalClassification_NormalPool_Classify;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Parameter: @CustomersXML (XML)
+end note
+
+:Initialize Constants;
+note right
+    Category Constants:
+    - CATEGORY_NULL = 0
+    - CATEGORY_NEW = 40100
+    - CATEGORY_NORMAL = 40300
+    - CATEGORY_GOOD = 40200
+    - CATEGORY_PROBATION = 40400
+    - CATEGORY_SMART = 40500
+    - CATEGORY_RISKY = 40600
+    - CATEGORY_CCRESET = -1
+end note
+
+:Create Temp Tables;
+note right
+    #tmpCustomers:
+    - CustId, SportGroup
+    - CurrentCategoryId, IsCheckBetCount
+    - IsProbationLastDay, IsPlaceBetWithin30Days
+    
+    #tmpRawData:
+    - CustId, SportGroup
+    - TurnoverRM, WinlossRM
+    - BetCount, ActiveDays, etc.
+    
+    #tmpCustomerAccummulatedInfo:
+    - CustId, SportGroup
+    - CurrentCategoryId, NewCategoryId
+    - TurnoverRM, WinlossRM, Margin
+    - BetCount, ActiveDays, WinDaysRate
+end note
+
+:Parse XML Customer List;
+note right
+    INSERT INTO #tmpCustomers
+    SELECT CustId, SportGroup
+         , CurrentCategoryId, IsCheckBetCount
+         , IsProbationLastDay
+    FROM @CustomersXML.nodes('//r')
+end note
+
+:Filter Realtime Classification;
+note right
+    DELETE FROM #tmpCustomers
+    WHERE IsCheckBetCount = 1
+      AND CurrentCategoryId NOT IN
+          (CATEGORY_NULL, CATEGORY_NEW, CATEGORY_NORMAL, CATEGORY_GOOD)
+end note
+
+:Get Accumulated Performance;
+note right
+    Build @ListCustIds from #tmpCustomers
+    EXEC bodb_dwrs.dbo.Acc_Rpt_CTS_GetCustAccumulatedInfo
+    @ListCustID = @ListCustIds, @isResetBalance = 0
+    INSERT INTO #tmpRawData
+end note
+
+:Filter No Performance;
+note right
+    DELETE FROM #tmpRawData
+    WHERE BetCount = 0
+       OR SportGroup = SPORT_PARLAY
+end note
+
+:Calculate Accumulated Info;
+note right
+    INSERT INTO #tmpCustomerAccummulatedInfo
+    SELECT CustId, SportGroup
+         , TurnoverRM, WinlossRM
+         , Margin = WinlossRM / TurnoverRM * 100
+         , BetCount, ActiveDays
+         , WinDaysRate = (WinDays / ActiveDays) * 100
+         , CurrentCategoryId, IsCheckBetCount
+         , IsProbationLastDay
+    FROM #tmpRawData
+    INNER JOIN #tmpCustomers
+end note
+
+:Check Place Bet Within 30 Days;
+note right
+    UPDATE #tmpCustomers
+    SET IsPlaceBetWithin30Days = 1
+    FROM CustomerClassification_BySport_LatestActiveDay
+    WHERE LastTransDate >= From30Date
+end note
+
+:Filter BetCount Check;
+note right
+    DELETE FROM #tmpCustomerAccummulatedInfo
+    WHERE IsCheckBetCount = 1
+      AND (
+          (CurrentCategoryId = CATEGORY_GOOD AND BetCount - LastBetCount < 100)
+          OR (CurrentCategoryId = CATEGORY_NORMAL AND BetCount - LastBetCount < 20)
+      )
+end note
+
+:Update Scanned Daily Customers;
+note right
+    UPDATE CustomerClassification_BySport_ScannedDailyCust
+    SET CreatedDate = CurrentDate
+    WHERE EXISTS in #tmpCustomerAccummulatedInfo
+    
+    INSERT INTO CustomerClassification_BySport_ScannedDailyCust
+    SELECT CustId, SportGroup, CurrentDate
+    FROM #tmpCustomerAccummulatedInfo
+    WHERE NOT EXISTS in ScannedDailyCust
+end note
+
+:Get Customer Info;
+note right
+    UPDATE #tmpRelatedCustInfo
+    SET SRecommend = c.srecommend
+      , SiteName = c.Site
+    FROM bodb02.dbo.Customer AS c
+end note
+
+:Determine NewCategoryId;
+note right
+    Classification Rules:
+    - Based on TurnoverRM, WinlossRM, Margin
+    - BetCount, ActiveDays, WinDaysRate
+    - CurrentCategoryId, IsProbationLastDay
+    - IsCheckBetCount, IsPlaceBetWithin30Days
+    - Special rules for Probation, Smart, Risky
+    UPDATE #tmpCustomerAccummulatedInfo
+    SET NewCategoryId = (calculated)
+end note
+
+:Update/Insert Classification;
+note right
+    Update or Insert into
+    CustomerClassification_BySport
+    with NewCategoryId
+end note
+
+stop
+
+@enduml
+

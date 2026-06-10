@@ -1,0 +1,307 @@
+@startuml MatchMonitorClassificationBySport_SP_Insert_Detailed
+!theme plain
+title Match Monitor Classification By Sport - SP Insert Detailed Flow (Updated 2025-11-19)
+
+start
+
+:CTS_DC_CustClassification_BySport_Insert;
+note right
+    **Database:** CTS_DataCenter (MySQL)
+    **Main Tables:** 
+    - CTSCustomerClassification_BySport
+    - CTSCustomerClassification_BySport_History
+    - SpecialCustomerClass_BySport
+    - CustomerCategory, CustomerCategorySettings
+    
+    **Parameters:**
+    - @ip_InputFlowID (INT)
+    - @ip_CustInfo (JSON)
+    - @op_ErrorMessage (VARCHAR)
+    
+    **InputFlowID Types:**
+    - 332: BYSPORT_INSERT_SPECIALCC
+    - 335: BYSPORT_INSERT_PACATEGORY
+    - 339: BYSPORT_INSERT_NORMAL
+    - 340: BYSPORT_RESCAN_PACATEGORY
+end note
+
+:STEP 1: GetInfo
+CTS_DC_CustClassification_BySport_Insert_GetInfo;
+
+partition "Parse JSON & Create Temp Tables" {
+    :Create Temp_NewClassification;
+    :Create Temp_CTSCustomerClassification_Old;
+    
+    if (InputFlowID?) then (SPECIALCC - 332)
+        :Parse JSON for Special CC;
+        note right
+            - Extract: CustID, CTSCustID, SportID
+            - Set DWCategoryID = CONST_CATEID_SPECIALCC
+            - Check existing classifications
+            - Set IsDataChanged flag
+        end note
+        
+    elseif (PA Category - 335 or Rescan PA - 340) then (yes)
+        :Parse JSON for PA Category;
+        note right
+            **PA Category Fields:**
+            - CustID, CTSCustID, SportID
+            - CategoryID (DWCategoryID)
+            - WinlossStatus (0=LOSING/PROBATION, 2=WINNING)
+            - TurnoverRM, WinlossRM, BetCount
+            - MatchID, PerformanceTime
+            - Set IsPAProbation based on WinlossStatus
+            - Get RelevantCategoryID from CustomerCategory
+        end note
+        
+    elseif (Normal - 339) then (yes)
+        :Parse JSON for Normal Category;
+        note right
+            - Extract: CustID, SportID, CategoryID
+            - TurnoverRM, WinlossRM, BetCount, ActiveDays
+            - Check if PA exists (IsExistPA flag)
+            - Get SpecialCC if exists
+        end note
+    endif
+}
+
+if (InputFlowID = SPECIALCC?) then (yes)
+    :Skip PreProcess and Process;
+    :Go directly to Complete;
+else (no)
+    if (InputFlowID = NORMAL?) then (yes)
+        :STEP 2: PreProcess
+        CTS_DC_CustClassification_BySport_Insert_PreProcess;
+        
+        partition "PreProcess - Normal Only" {
+            :Exclude Internal Customers;
+            
+            :Check Probation Customers;
+            note right
+                **Probation Rules:**
+                - Find customers with PROBATION category
+                - Calculate LastProbationDay from StaticList
+                - Check if ProbationDate >= CurrentDate - 2 days
+                - Set IsPassProbationRule flag
+            end note
+            
+            :Check Existing PA;
+            note right
+                **PA Check:**
+                - If customer has PA classification
+                - Set ActionType = 3 (EXISTEDPA)
+                - Set IsReturnData = 0
+            end note
+            
+            :Update ActionType for Probation;
+            note right
+                **ActionType Values:**
+                - 0: Insert
+                - 1: Update
+                - 3: ExistedPA (skip)
+                - 5: IgnoreProbation (skip)
+            end note
+        }
+    endif
+    
+    :STEP 3: Process
+    CTS_DC_CustClassification_BySport_Insert_Process;
+    
+    if (InputFlowID = NORMAL?) then (yes)
+        partition "Process - Normal Flow" {
+            :Get Last History Record;
+            
+            :Check for SpecialCC Removal;
+            note right
+                If last TargetCC = -1 or CategoryID = SPECIALCC
+                Set ActionType = 6 (RESCAN_CHANGECC)
+            end note
+            
+            :Set New Category;
+            note right
+                NewCategoryID = DWCategoryID
+                NewCategoryGroupID = DWCategoryID
+            end note
+            
+            :Get Old Classification;
+            :Compare Old vs New;
+            
+            :Determine ActionType;
+            note right
+                **Logic:**
+                - If NewCategoryID ≠ OldCategoryID → INSERT
+                - If NewCategoryID = OldCategoryID → UPDATE
+                - Set SourceTypeID based on category change
+            end note
+            
+            :Calculate TargetCC;
+            note right
+                TargetCC = SpecialCC ?? CustomerClass
+            end note
+        }
+        
+    else (PA Category)
+        partition "Process - PA Flow" {
+            :Create Temp_PAWinlossStatus;
+            :Create Temp_CustProbationStatus;
+            
+            if (IsRescan?) then (yes)
+                :Get WinlossStatus from DWCategoryID;
+                note right
+                    Check IsDangerProbation flag
+                    from CustomerCategory
+                end note
+            else (no)
+                :Get WinlossStatus from existing PA;
+            endif
+            
+            :Update IsPAProbation;
+            note right
+                IsPAProbation = 1 if WinlossStatus = 0
+                IsPAProbation = 0 if WinlossStatus = 2
+            end note
+            
+            :Set NewCategoryID based on Probation;
+            note right
+                Find CategoryID where:
+                - CategoryID IN (DWCategoryID, RelevantCategoryID)
+                - IsPAProbation matches calculated value
+            end note
+            
+            :Get Existing Classifications;
+            note right
+                **Priority Logic:**
+                - Check CustomerClassPriority
+                - Handle IsMultiCateIDSameParentID
+                - Handle IsKeepOldCateID
+                - Set IsRemove flag
+            end note
+            
+            :Compare with Last History;
+            
+            :Handle Probation Status Change;
+            note right
+                **DataChangeType:**
+                - 0: New or Change Category
+                - 1: Change Probation Status
+                - 2: No Change
+            end note
+            
+            :Insert records for Probation changes;
+            note right
+                If IsPAProbation changed:
+                - Create new record in Temp_NewClassification
+                - Set appropriate CategoryID
+            end note
+        }
+    endif
+endif
+
+:STEP 4: Complete
+CTS_DC_CustClassification_BySport_Insert_Complete;
+
+if (InputFlowID = SPECIALCC?) then (yes)
+    partition "Complete - Special CC" {
+        :INSERT SpecialCustomerClass_BySport;
+        :INSERT SpecialCustomerClass_BySport_History;
+        :INSERT CTSCustomerClassification_BySport (Wrapper);
+        :INSERT History and Log;
+        
+        :Create UserLog;
+        note right
+            LogTypeID = 19
+            Log customer list and sport info
+        end note
+    }
+    
+elseif (InputFlowID = NORMAL?) then (yes)
+    partition "Complete - Normal" {
+        if (ActionType = UPDATE?) then (yes)
+            :UPDATE CTSCustomerClassification_BySport;
+            note right
+                Update CategoryID, LastModifiedDate
+                LastScannedDate
+            end note
+        endif
+        
+        if (ActionType = INSERT?) then (yes)
+            :DELETE existing Normal classification;
+            :INSERT new CTSCustomerClassification_BySport;
+        endif
+        
+        :INSERT History (if IsDataChanged = 1);
+        :INSERT Log (all records);
+        
+        note right
+            **History includes:**
+            - TurnoverRM, WinlossRM
+            - BetCount, ActiveDays
+            - PerformanceTime
+            - SourceTypeID
+        end note
+    }
+    
+else (PA Category)
+    partition "Complete - PA Category" {
+        :DELETE old classifications (IsRemove = 1);
+        
+        :UPDATE PA for Probation Status Change;
+        note right
+            If DataChangeType = 1:
+            Update CategoryID to NewCategoryID
+        end note
+        
+        :INSERT new PA classifications;
+        note right
+            Insert when:
+            - DataChangeType = 0 AND IsDataChanged = 1
+            - IsFromOldPA = 1 AND not Rescan
+        end note
+        
+        :Calculate TargetCCForHistory;
+        note right
+            TargetCCForHistory = SpecialCC ?? TargetCC
+        end note
+        
+        :INSERT History;
+        :INSERT Log;
+        
+        note right
+            **SourceTypeID Logic:**
+            - Use RemarkTemplateID if exists
+            - Use CONST_REMARKID_AUTOMARKGB if MatchID exists
+        end note
+    }
+endif
+
+:STEP 5: Return Results;
+note right
+    SELECT DISTINCT
+        CustID
+        SportID AS SportGroup
+        TargetCC AS CustomerClass
+    FROM Temp_NewClassification
+    WHERE IsReturnData = 1
+end note
+
+stop
+
+legend right
+    **Key Updates (Redmine #239995):**
+    - Added PA Category Insert flow (InputFlowID 335)
+    - Added PA Category Rescan flow (InputFlowID 340)
+    - Enhanced probation status handling
+    - Added WinlossStatus tracking (0=LOSING, 2=WINNING)
+    - Improved priority and multi-category logic
+    
+    **ActionType Values:**
+    0 = Insert | 1 = Update | 3 = ExistedPA
+    5 = IgnoreProbation | 6 = RescanChangeCC
+    
+    **DataChangeType Values:**
+    0 = New/Change Category
+    1 = Change Probation Status
+    2 = No Change
+endlegend
+
+@enduml

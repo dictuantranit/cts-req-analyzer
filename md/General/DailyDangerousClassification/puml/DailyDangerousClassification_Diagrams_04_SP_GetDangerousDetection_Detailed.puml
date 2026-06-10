@@ -1,0 +1,342 @@
+@startuml DailyDangerousClassification_SP_GetDangerousDetection
+title CTS_DC_DangerousDetection_GetLatest - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E8F5E9
+skinparam activityBorderColor #4CAF50
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_DangerousDetection_GetLatest
+  **Database**: CTS_DataCenter.ctsService (MySQL)
+  **Timeout**: 300 seconds (default)
+  **Called From**: GetDangerousDetectionToCCCriteria
+end note
+
+partition "Input Parameters" {
+  :Receive @ip_IsLicensee (bool);
+  note right
+    **Customer Type Filter**:
+    - true: Licensee (Deposit) customers
+    - false: Credit customers
+    
+    **Purpose**: Separate processing and pagination
+  end note
+}
+
+partition "Get Pagination State" {
+  :Read System Parameters;
+  note right
+    **Get Current Position**:
+    ```sql
+    -- For Licensee (Deposit)
+    IF @ip_IsLicensee = 1 THEN
+      SELECT Value INTO @LastCustID
+      FROM CTS_SystemParameter
+      WHERE ParameterKey = 'DangerousScoreClassification_Deposit_LastCustID'
+      
+      SELECT Value INTO @LastScannedDate
+      FROM CTS_SystemParameter
+      WHERE ParameterKey = 'DangerousScoreClassification_Deposit_LastScannedDate'
+    
+    -- For Credit
+    ELSE
+      SELECT Value INTO @LastCustID
+      FROM CTS_SystemParameter
+      WHERE ParameterKey = 'DangerousScoreClassification_Credit_LastCustID'
+      
+      SELECT Value INTO @LastScannedDate
+      FROM CTS_SystemParameter
+      WHERE ParameterKey = 'DangerousScoreClassification_Credit_LastScannedDate'
+    END IF
+    ```
+    
+    **Initial State** (first run):
+    - @LastCustID = 0
+    - @LastScannedDate = NULL or earliest date
+    
+    **Subsequent Runs**:
+    - Start from last processed position
+    - Resume processing seamlessly
+  end note
+
+  :Set @LastCustID and @LastScannedDate;
+}
+
+partition "Get Dangerous Score Threshold" {
+  :Read threshold configuration;
+  note right
+    **Dangerous Score Threshold**:
+    ```sql
+    SELECT Value INTO @DangerousThreshold
+    FROM CTS_SystemParameter
+    WHERE ParameterKey = 'DangerousScore_Threshold'
+    ```
+    
+    **Typical Value**: 70 (out of 100)
+    **Meaning**: Scores > 70 are considered dangerous
+    
+    **Configurable** per business requirements
+  end note
+}
+
+partition "Query Dangerous Customers" {
+  :Calculate batch size;
+  note right
+    **Batch Limit**: 10,000 customers
+    - Prevent overwhelming system
+    - Memory-efficient processing
+    - Balance throughput vs resources
+  end note
+
+  :Build pagination subquery;
+  note right
+    **Pagination Subquery**:
+    ```sql
+    SELECT CustID
+    FROM DangerousDetection
+    WHERE 1=1
+      AND IsLicensee = @ip_IsLicensee
+      AND CustID > @LastCustID
+      AND ClassifiedDate > @LastScannedDate
+      AND ClassifiedScore > @DangerousThreshold
+    ORDER BY CustID
+    LIMIT 10000
+    ```
+    
+    **Filter Conditions**:
+    1. **IsLicensee**: Customer type match
+    2. **CustID > @LastCustID**: Pagination (primary)
+    3. **ClassifiedDate > @LastScannedDate**: Date filter (secondary)
+    4. **ClassifiedScore > @DangerousThreshold**: Dangerous only
+  end note
+
+  :First Result Set - Pagination Info;
+  note right
+    **Result Set 1**: DangerousToCCLastScannedEntity
+    ```sql
+    SELECT 
+      MAX(sub.CustID) AS LastCustID,
+      MAX(sub.ClassifiedDate) AS LastScannedDate
+    FROM (
+      -- pagination subquery here
+    ) sub
+    ```
+    
+    **Purpose**: Track progress for next iteration
+    **Output**:
+    - LastCustID (long): Last processed CustID
+    - LastScannedDate (DateTime?): Last classification date
+    
+    **Usage**:
+    - Will be stored in system parameters
+    - Next iteration starts from these values
+    - Enables resumable processing
+  end note
+
+  :Second Result Set - Dangerous Customers;
+  note right
+    **Result Set 2**: DangerousToCCEntity[]
+    ```sql
+    SELECT 
+      d.CustID,
+      d.CTSCustID,
+      d.SubscriberID,
+      d.RoleID,
+      d.CategoryID,          -- PA category (AI predicted)
+      d.CategoryGroup,       -- PA group
+      d.ClassifiedDate,      -- When AI detected
+      d.ClassifiedScore      -- Dangerous score (0-100)
+    FROM DangerousDetection d
+    WHERE d.CustID IN (
+      -- pagination subquery here
+    )
+    ORDER BY d.CustID
+    ```
+    
+    **Purpose**: Customers to be classified as PA
+    **Count**: 0 to 10,000 customers
+    
+    **Field Details**:
+    - **CustID**: Customer identifier
+    - **CTSCustID**: CTS system customer ID
+    - **CategoryID**: AI predicted PA category
+    - **CategoryGroup**: PA group classification
+    - **ClassifiedScore**: 0-100 (higher = more dangerous)
+    - **ClassifiedDate**: AI detection timestamp
+  end note
+}
+
+partition "Data Source Context" {
+  note right
+    **DangerousDetection Table** (populated by AI/ML):
+    
+    **Table Structure**:
+    ```sql
+    CREATE TABLE DangerousDetection (
+      DetectionID BIGINT PRIMARY KEY AUTO_INCREMENT,
+      CustID BIGINT NOT NULL,
+      CTSCustID INT,
+      SubscriberID INT,
+      RoleID INT,
+      IsLicensee BOOLEAN,
+      CategoryID INT,              -- AI predicted category
+      CategoryGroup INT,           -- PA group
+      ClassifiedScore DECIMAL(5,2), -- Dangerous score
+      ClassifiedDate DATETIME,     -- Detection timestamp
+      ModelVersion VARCHAR(50),    -- ML model version
+      ConfidenceLevel DECIMAL(3,2),-- Prediction confidence
+      InsertedDate DATETIME,
+      UpdatedDate DATETIME,
+      INDEX idx_IsLicensee_CustID (IsLicensee, CustID),
+      INDEX idx_ClassifiedDate (ClassifiedDate),
+      INDEX idx_ClassifiedScore (ClassifiedScore)
+    )
+    ```
+    
+    **Populated By**: AI/ML Detection System
+    **Population Process**:
+    1. ML model runs periodically (e.g., hourly)
+    2. Calculates dangerous scores for all customers
+    3. Scores above threshold inserted/updated
+    4. Includes predicted PA category
+    5. Stores model metadata (version, confidence)
+    
+    **Score Calculation** (AI/ML):
+    - Betting pattern analysis (30%)
+    - Win/loss pattern analysis (25%)
+    - Transaction pattern analysis (25%)
+    - Behavioral pattern analysis (20%)
+    
+    **Threshold Examples**:
+    - 0-40: Low risk (not stored)
+    - 41-70: Medium risk (stored but not processed)
+    - 71-85: High risk (dangerous, process as PA)
+    - 86-100: Critical risk (dangerous, immediate attention)
+  end note
+}
+
+if (Result sets have data?) then (yes)
+  :Return Multiple Result Sets;
+  note right
+    **Multiple Result Sets Returned**:
+    
+    1. **Pagination Info**:
+       - LastCustID (for next batch)
+       - LastScannedDate (for date filter)
+    
+    2. **Dangerous Customers**:
+       - Customer details
+       - AI predictions
+       - Dangerous scores
+       - Classification info
+    
+    **Usage Flow**:
+    1. Service receives both result sets
+    2. Checks if LastCustID > 0 (more data exists)
+    3. Processes customer list
+    4. Updates system parameters with pagination info
+    5. Next iteration uses updated pagination values
+  end note
+else (no)
+  :Return empty result sets;
+  note right
+    **No Dangerous Customers**:
+    - LastCustID = 0
+    - Empty customer list
+    - Indicates all processed
+    - Job will complete
+  end note
+endif
+
+:Log Execution;
+note right
+  **Logging**:
+  - Customer count returned
+  - LastCustID value
+  - LastScannedDate value
+  - Dangerous score range
+  - Query execution time
+  - Any errors/warnings
+end note
+
+stop
+
+note bottom
+  **Pagination Logic Summary**:
+  
+  **First Iteration**:
+  - @LastCustID = 0
+  - @LastScannedDate = NULL
+  - Get first batch (oldest dangerous customers)
+  - Return LastCustID and LastScannedDate
+  
+  **Subsequent Iterations**:
+  - @LastCustID = previous LastCustID
+  - @LastScannedDate = previous LastScannedDate
+  - Get next batch (CustID > @LastCustID)
+  - Return new LastCustID and LastScannedDate
+  
+  **Last Iteration**:
+  - Returns < 10,000 customers (partial batch)
+  - Or returns 0 customers (all done)
+  - LastCustID set to last processed
+  
+  **Dual Pagination Keys**:
+  1. **LastCustID** (Primary):
+     - Ensures no duplicates
+     - Consistent ordering
+     - Main pagination driver
+  
+  2. **LastScannedDate** (Secondary):
+     - Filters by classification date
+     - Avoids reprocessing old detections
+     - Date-based filtering
+  
+  **Separate Tracking**:
+  - Licensee (Deposit) and Credit independent
+  - Each has own system parameters
+  - Prevents mixing customer types
+  - Enables parallel processing (separate jobs)
+  
+  **Index Strategy**:
+  ```sql
+  -- Composite index for efficient pagination
+  CREATE INDEX idx_Pagination 
+  ON DangerousDetection 
+  (IsLicensee, CustID, ClassifiedDate, ClassifiedScore)
+  
+  -- Supports:
+  -- 1. IsLicensee filter
+  -- 2. CustID ordering (pagination)
+  -- 3. ClassifiedDate filter
+  -- 4. ClassifiedScore threshold
+  ```
+  
+  **AI/ML Integration**:
+  - This SP is **consumer** of AI/ML output
+  - AI/ML system is **producer** (populates DangerousDetection)
+  - Decoupled architecture
+  - ML model can evolve independently
+  - ML predictions stored for audit trail
+  
+  **Performance**:
+  - Query time: < 1 second (with indexes)
+  - Batch size: 10,000 (configurable)
+  - Memory efficient
+  - Scalable to millions of customers
+  
+  **Business Logic**:
+  - Only customers with dangerous scores processed
+  - Threshold configurable (e.g., > 70)
+  - AI predicted PA categories used
+  - Automatic classification (no manual review)
+end note
+
+@enduml
+

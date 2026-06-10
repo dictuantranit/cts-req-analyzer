@@ -1,0 +1,176 @@
+@startuml SabaGroupBetting_Sequence
+!theme plain
+title Match Monitor Saba Group Betting - Sequence Diagram (Updated 2025-11-19)
+
+actor "Job Scheduler" as Scheduler
+participant "MatchMonitor\nController" as Controller
+participant "MatchMonitorJob\nService" as JobService
+participant "MMRuleSabaGB\nService" as SabaService
+participant "MMRuleSabaGBProcess\nService" as ProcessService
+participant "AssociationDetection\nService" as AssocService
+database "MySQL\nCTS_DataCenter" as DB
+
+note over Scheduler, DB
+    **Staging Phase completed (shared with all rules)**
+    **Focus on Processing Phase (Saba-specific)**
+end note
+
+Scheduler -> Controller: POST /api/matchmonitor/MatchMonitorProcessRuleSabaGroupBettingLive\nnumberOfThread=4
+activate Controller
+
+Controller -> JobService: ProcessRuleSabaGroupBetting(isLive=true, numberOfThread=4)
+activate JobService
+
+JobService -> SabaService: GetMatchRuleSabaGB(isLive=true)
+activate SabaService
+
+SabaService -> DB: EXEC CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get\n@ip_LiveIndicator=1
+activate DB
+note right of DB
+    **Returns 2 result sets:**
+    1. MatchStagingList (grouped)
+       - CustIDList, CTSCustIDList
+       - SequenceIDList
+    2. CTSCustomerList ← For mapping!
+       - CustID, CTSCustID
+    
+    **OUT Parameter:**
+    - op_MaxSequenceID
+    
+    **Tables:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - MatchMonitorRuleSetting
+    - SystemParameter
+end note
+DB --> SabaService: MaxSequenceID, CTSCustomerList, MatchStagingList
+deactivate DB
+
+note over SabaService
+    **CREATE MAPPING DICTIONARY**
+    
+    MappingCustDictionary = CTSCustomerList
+        .Select(x => new { x.CustID, x.CTSCustID })
+        .Distinct()
+        .ToDictionary(x => x.CustID, x => x.CTSCustID);
+    
+    Example:
+    { 101: 5001, 102: 5002, 103: 5003, ... }
+end note
+
+SabaService -> SabaService: Group matches by key
+
+SabaService --> JobService: MatchStagingRuleSabaGBProcessModel\n+ MappingCustDictionary
+deactivate SabaService
+
+JobService -> JobService: Parallel process matches\nAsParallel().WithDegreeOfParallelism(4)
+
+loop For each match (parallel)
+    JobService -> ProcessService: GetInstanceProcessSabaGBService()
+    activate ProcessService
+    
+    ProcessService -> ProcessService: PrepareProcess(matchInfo, isLive, **mappingCustDictionary**)
+    note right
+        **Pass MappingCustDictionary!**
+        Key difference from standard GB
+    end note
+    
+    ProcessService -> ProcessService: ProcessRound1()
+    loop For each customer group
+        ProcessService -> ProcessService: DetectAssociation(CTSCustIDList, CustIDList)
+        note right
+            **Simplified params:**
+            IsDevice = true
+            IsAI = true
+            IsIP = true
+            Is3MatchesLast7Days = true
+            MappingCustDictionary = dict
+        end note
+        
+        ProcessService -> AssocService: DetectAssociation(param)
+        activate AssocService
+        AssocService -> DB: Query Association Tables\n@CTSCustIds, @MappingDict
+        activate DB
+        DB --> AssocService: Associations with GroupID
+        deactivate DB
+        AssocService --> ProcessService: DetectAssociationMergeGroupEntity[]
+        deactivate AssocService
+        
+        alt Has GroupID
+            note right of ProcessService
+                Process in application layer
+                (No SP call for Process)
+            end note
+        end
+    end
+    
+    ProcessService -> ProcessService: ProcessRound2()
+    note right: Same as Round 1 with refined lists
+    
+    ProcessService -> ProcessService: Complete(maxSequenceID)
+    note right
+        Merge Round 1 and 2
+        Assign GroupID
+    end note
+    
+    alt Has Complete Matches
+        ProcessService -> DB: EXEC CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete\n@ip_LiveIndicator, @ip_TransGroup
+        activate DB
+        note right of DB
+            **Operations:**
+            - INSERT/UPDATE MatchMonitorDetails
+            - UPDATE MatchMonitorStagingGroupBettingSabaLive
+              SET GroupID = TargetGroupID
+            - INSERT MatchMonitor
+            
+            **Tables:**
+            - MatchMonitorDetails (Reason=0)
+            - MatchMonitor
+            - MatchMonitorStagingGroupBettingSabaLive
+        end note
+        DB --> ProcessService: Success
+        deactivate DB
+    end
+    
+    ProcessService --> JobService: Complete
+    deactivate ProcessService
+end
+
+JobService -> SabaService: CleanTransRuleSabaGB(isLive, maxSequenceID)
+activate SabaService
+SabaService -> DB: EXEC CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean\n@ip_LiveIndicator, @ip_MaxSequenceID
+activate DB
+note right of DB
+    **Clean-up:**
+    - DELETE old transactions
+    - Keep last TimeStep
+    - UPDATE SystemParameter (162/163)
+    
+    **Tables:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - SystemParameter
+end note
+DB --> SabaService: Deleted rows
+deactivate DB
+SabaService --> JobService: Success
+deactivate SabaService
+
+JobService --> Controller: true
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK { success: true }
+deactivate Controller
+
+note over Scheduler, DB
+    **Key Saba Features Used:**
+    1. ✅ MappingCustDictionary created from CTSCustomerList
+    2. ✅ Fixed association criteria (no sport config)
+    3. ✅ Saba-specific tables (MatchMonitorStagingGroupBettingSaba*)
+    4. ✅ Results saved to MatchMonitorDetails (Reason=0)
+    
+    **Stored Procedures:**
+    - CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get
+    - CTS_DC_MatchMonitor_RuleGroupBettingSaba_Complete
+    - CTS_DC_MatchMonitor_RuleGroupBettingSaba_StagingClean
+end note
+
+@enduml

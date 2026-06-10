@@ -1,0 +1,182 @@
+@startuml NormalAccountInsertBySport_SP_Insert_Detailed
+!theme plain
+title Normal Account Insert By Sport - SP Insert Detailed
+
+start
+
+:Call SP: CTS_DC_CustClassification_BySport_Insert;
+note right
+    Database: CTS_DataCenter (MySQL)
+    InputFlowID: 332 (BySportInsertNormal)
+    CustInfo: JSON array of customers
+end note
+
+partition "STEP 1: GetInfo" {
+    :Call SP: CTS_DC_CustClassification_BySport_Insert_GetInfo;
+    note right
+        Parse JSON and prepare temp tables
+    end note
+    
+    :Create Temp_NewClassification table;
+    note right
+        Columns: CustID, CTSCustID, SportID, DWCategoryID, TurnoverRM, WinlossRM, BetCount, ActiveDays, PerformanceTime, SpecialCC, etc.
+    end note
+    
+    :Parse JSON customer list;
+    note right
+        Extract: CustID, SportID, DWCategoryID, TurnoverRM, WinlossRM, BetCount, ActiveDays, PerformanceTime
+    end note
+    
+    :Join with CTSCustomer to get CTSCustID;
+    note right
+        Table: CTSCustomer
+        Join: CustID = CustID AND CustSubID = 0
+    end note
+    
+    :Join with SpecialCustomerClass_BySport to get SpecialCC;
+    note right
+        Table: SpecialCustomerClass_BySport
+        Join: CustID = CustID AND SportID = SportID
+        Get: CustomerClass as SpecialCC
+    end note
+    
+    :Mark IsExistPA if customer has PA classification;
+    note right
+        Check: EXISTS (SELECT 1 FROM CTSCustomerClassification_BySport WHERE ParentID = CONST_PARENTID_PA)
+    end note
+    
+    :Insert into Temp_NewClassification;
+    note right
+        Filter: DWCategoryID <> 0
+    end note
+}
+
+partition "STEP 2: PreProcess (Only for Normal)" {
+    :Call SP: CTS_DC_CustClassification_BySport_Insert_PreProcess;
+    note right
+        Only called when InputFlowID = BySportInsertNormal
+    end note
+    
+    :Exclude internal customers;
+    note right
+        Call: CTS_DC_ExcludeCustByCondition('Temp_NewClassification')
+    end note
+    
+    :Check probation customers;
+    note right
+        Get customers with Probation category
+        Check if pass probation rule:
+        - ProbationDate >= ToProbationLastDay (2 days ago)
+        - OR (NewCategory is Probation/Smart/Risky AND ProbationDate > LastProbationDay)
+    end note
+    
+    :Set ActionType for ignored customers;
+    note right
+        - CONST_ACTIONTYPE_IGNOREPROBATION (5): Not pass probation rule
+        - CONST_ACTIONTYPE_EXISTEDPA (3): Has existing PA classification
+        Set IsDataChanged = 0, IsReturnData = 0
+    end note
+    
+    :Update IsDataChanged for probation customers;
+    note right
+        If DWCategoryID = Probation AND ProbationDate < LastProbationDay
+        Set: IsDataChanged = 0, ActionType = UPDATE
+    end note
+}
+
+partition "STEP 3: Process" {
+    :Call SP: CTS_DC_CustClassification_BySport_Insert_Process;
+    note right
+        Process normal account insert
+    end note
+    
+    :Get last history record;
+    note right
+        Table: CTSCustomerClassification_BySport_History
+        Get: Last CategoryID, TargetCC
+    end note
+    
+    :Check if need to remove SpecialCC;
+    note right
+        If last history TargetCC = -1 OR CategoryID = SpecialCC
+        Set: ActionType = CONST_ACTIONTYPE_RESCAN_CHANGECC (6)
+    end note
+    
+    :Set NewCategoryID and NewCategoryGroupID;
+    note right
+        NewCategoryGroupID = DWCategoryID
+        NewCategoryID = DWCategoryID
+    end note
+    
+    :Get old classification;
+    note right
+        Table: CTSCustomerClassification_BySport
+        Join: ParentID = CONST_PARENTID_NORMAL
+        Get: OldCategoryID, OldCategoryGroupID
+    end note
+    
+    :Calculate ActionType;
+    note right
+        - INSERT (0): IsDataChanged = 1 AND NewCategoryID <> OldCategoryID
+        - UPDATE (1): IsDataChanged = 1 AND NewCategoryID = OldCategoryID
+        - RESCAN_CHANGECC (6): Remove SpecialCC
+    end note
+    
+    :Calculate SourceTypeID;
+    note right
+        - CONST_SOURCETYPE_LESSTHAN10TICKETS (1): OldCategoryGroupID = NEW AND NewCategoryGroupID = NEW
+        - CONST_SOURCETYPE_SAMECATEGORY (0): OldCategoryGroupID = NewCategoryGroupID
+    end note
+    
+    :Set TargetCC;
+    note right
+        TargetCC = IFNULL(SpecialCC, CustomerClass from CategoryMapping)
+    end note
+    
+    :Update IsDataChanged;
+    note right
+        If ActionType = UPDATE/RESCAN_CHANGECC AND NewCategoryID = OldCategoryID
+        Set: IsDataChanged = 0
+    end note
+}
+
+partition "STEP 4: Complete" {
+    :Call SP: CTS_DC_CustClassification_BySport_Insert_Complete;
+    note right
+        Insert/Update actual tables
+    end note
+    
+    :Insert/Update CTSCustomerClassification_BySport;
+    note right
+        Table: CTSCustomerClassification_BySport
+        For records with IsDataChanged = 1
+        - INSERT: If not exists
+        - UPDATE: If exists (ParentID = CONST_PARENTID_NORMAL)
+        Fields: CustID, SportID, CategoryID, ParentID, TargetCC, TurnoverRM, WinlossRM, BetCount, ActiveDays, PerformanceTime, LastModifiedDate
+    end note
+    
+    :Insert into CTSCustomerClassification_BySport_History;
+    note right
+        Table: CTSCustomerClassification_BySport_History
+        Insert history record for all changes
+        Fields: ActionType, Remark, TargetCC, etc.
+    end note
+    
+    :Insert into CTSCustomerClassification_BySport_Log;
+    note right
+        Table: CTSCustomerClassification_BySport_Log
+        Insert log record
+    end note
+}
+
+:Return CustInfos;
+note right
+    SELECT: CustID, SportGroup, CustomerClass
+    FROM Temp_NewClassification
+    WHERE IsReturnData = 1
+end note
+
+stop
+
+@enduml
+

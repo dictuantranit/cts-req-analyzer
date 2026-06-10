@@ -1,0 +1,93 @@
+@startuml ProbationClassificationBySport_SP_ProbationScan_Get_Detailed
+!theme plain
+title Probation Classification By Sport - SP ProbationScan Get Detailed Flow
+
+start
+:CTS_DC_CustClassification_BySport_ProbationScan_Get;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Parameter: @op_LastCustID (OUTPUT)
+end note
+
+:Get Constants;
+note right
+    CONST_PARENTID_NORMAL
+    CONST_CATEGROUPID_PROBATION
+    CONST_PARENTID_WRAPPER
+    CONST_CATEID_PROBATION
+end note
+
+:Initialize Variables;
+note right
+    lv_CurrentDate = CURRENT_DATE()
+    lv_ToLastDay = CurrentDate - 2 days
+    lv_From30Date = CurrentDate - 29 days
+end note
+
+:Create Temp Table;
+note right
+    Temp_Cust:
+    - CustID (BIGINT UNSIGNED)
+    - SportID (SMALLINT)
+    - PRIMARY KEY (CustID, SportID)
+end note
+
+:Get System Parameters;
+note right
+    SELECT ParameterValue FROM SystemParameter
+    WHERE ParameterID = 168 (BatchSize)
+    WHERE ParameterID = 169 (LastCustID)
+end note
+
+:Get Probation Customers;
+note right
+    INSERT INTO Temp_Cust
+    SELECT tmplc.CustID, tmplc.SportID
+    FROM CTSCustomerClassification_BySport AS clss
+    LATERAL JOIN (
+        SELECT cc.CustID, cc.SportID, cc.CategoryID
+             , ca.CategoryGroupID, cc.LastScannedDate
+             , cc.CreatedDate
+        FROM CTSCustomerClassification_BySport AS cc
+        INNER JOIN CustomerCategory AS ca
+          ON ca.CategoryID = cc.CategoryID
+        WHERE cc.CustID = clss.CustID
+          AND cc.SportID = clss.SportID
+          AND ca.IsActive = 1
+          AND ca.ParentID <> CONST_PARENTID_WRAPPER
+        ORDER BY ca.CategoryPriority ASC
+               , cc.LastModifiedDate DESC
+        LIMIT 1
+    ) AS tmplc
+    WHERE clss.CustID > LastCustID
+      AND clss.CategoryID = CONST_CATEID_PROBATION
+      AND tmplc.CategoryID = clss.CategoryID
+      AND (tmplc.LastScannedDate IS NULL
+           OR tmplc.LastScannedDate < CurrentDate)
+      AND tmplc.CreatedDate < ToLastDay
+      AND EXISTS (
+          SELECT 1 FROM CTSCustomerAssociationStatus
+          WHERE CTSCustID = clss.CTSCustID
+            AND LastTicketDate >= From30Date
+      )
+    ORDER BY clss.CustID ASC
+    LIMIT BatchSize
+end note
+
+:Get Max CustID;
+note right
+    SELECT MAX(CustID) FROM Temp_Cust
+    INTO @op_LastCustID
+end note
+
+:Return Results;
+note right
+    SELECT DISTINCT CustID AS CustId
+         , SportID AS SportGroup
+    FROM Temp_Cust
+end note
+
+stop
+
+@enduml
+

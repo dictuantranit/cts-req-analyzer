@@ -1,0 +1,119 @@
+@startuml MatchMonitor_DataLineage
+
+title Match Monitor - Data Lineage Flow (4 Steps)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+skinparam shadowing false
+
+' ============================================
+' STEP 1: TICKET DETECTION
+' ============================================
+rectangle "**STEP 1: Ticket Detection**" #E3F2FD {
+    
+    component "**Group Betting Detection**\n//md/MatchMonitor/GroupBetting//\n\n- Detect group betting patterns\n- 5 association criteria\n- All sports\n- Run every 5 minutes" as JobGB #BBDEFB
+    
+    component "**Saba Group Betting Detection**\n//md/MatchMonitor/SabaGroupBetting//\n\n- Detect Saba group betting\n- 4 association criteria\n- Saba Soccer only\n- Run every 5 minutes" as JobSabaGB #BBDEFB
+}
+
+' ============================================
+' STEP 2: TICKET LABELING
+' ============================================
+rectangle "**STEP 2: Ticket Labeling (Reason = GB)**" #C8E6C9 {
+    
+    database "**CTSMatchMonitor**\n\n- MatchID (PK)\n- SportType, BetTypeID\n- **Reason = 'GB'**\n- FraudTrans\n- EventDate, ScanDate" as TableMatch #A5D6A7
+    
+    database "**CTSMatchMonitorDetail**\n\n- ID (PK), MatchID (FK)\n- CustID, TransID\n- **Reason = 'GB'**\n- BetChoice\n- VerifiedBy" as TableDetail #A5D6A7
+    
+    note right of TableMatch
+        All tickets detected in Step 1
+        are marked with Reason = "GB"
+    end note
+}
+
+' ============================================
+' STEP 3: GENERAL CUSTOMER CLASSIFICATION
+' ============================================
+rectangle "**STEP 3: General Customer Classification**" #FFF9C4 {
+    
+    component "**Match Monitor Classification**\n//md/General/MatchMonitorClassification//\n\n- Classify customers with GB tickets\n- CategoryName =\n  ""System Detect Group Betting""\n- Cross-sport detection\n- One match at a time (FIFO)\n- Run every 5 minutes" as JobGeneral #FFF59D
+}
+
+' ============================================
+' STEP 4: SPORT-SPECIFIC CLASSIFICATION
+' ============================================
+rectangle "**STEP 4: Sport-Specific Customer Classification**" #FFCCBC {
+    
+    component "**Match Monitor Classification By Sport**\n//md/BySport/MatchMonitorClassificationBySport//\n\n- Classify customers with GB tickets\n- CategoryName =\n  ""Saba System Detect Group Betting""\n- Sport-specific (Saba Soccer)\n- Multiple matches (parallel)\n- Run every 5 minutes" as JobBySport #FFAB91
+}
+
+' ============================================
+' DATABASE (CUSTOMER CLASSIFICATION)
+' ============================================
+rectangle "**Database - Customer Classification**" #F5F5F5 {
+    
+    database "**CTSCustomerClassification**\n\n- CustID (PK)\n- **CategoryID** (CC type)\n- **CategoryName:**\n  - ""System Detect Group Betting"" (Step 3)\n  - ""Saba System Detect Group Betting"" (Step 4)\n- SportGroupID\n- IsPA (Problem Account)\n- LastModifiedDate" as TableCust #E0E0E0
+}
+
+' ============================================
+' WEB PAGE
+' ============================================
+rectangle "**Website - Match Monitor Page**" #E1BEE7 {
+    
+    component "**Match Monitor Page**\n//Website/MatchMonitor//\n\n- Display dangerous matches\n- Show customer CC status\n- Verify transactions\n- Mark Problem Account\n\n**Max 5-minute delay**" as WebPage #CE93D8
+}
+
+' ============================================
+' EXTERNAL DATABASE
+' ============================================
+rectangle "**External Database (MainDB)**" #ECEFF1 {
+    database "**Match Info**\n\n- MatchID\n- HomeName\n- AwayName\n- LeagueName\n- KickOffTime" as DBMatchInfo #CFD8DC
+    
+    database "**Transaction**\n\n- TransID\n- CustID\n- BetAmount\n- BetChoice\n- IsVoid" as DBTrans #CFD8DC
+}
+
+' ============================================
+' RELATIONSHIPS - FLOW SEQUENCE
+' ============================================
+
+' Step 1 to Step 2: Detection jobs write tickets
+JobGB -down-> TableMatch : **STEP 1 to 2**\nINSERT matches\nReason = "GB"
+JobGB -down-> TableDetail : **STEP 1 to 2**\nINSERT tickets\nReason = "GB"
+
+JobSabaGB -down-> TableMatch : **STEP 1 to 2**\nINSERT matches\nReason = "GB"
+JobSabaGB -down-> TableDetail : **STEP 1 to 2**\nINSERT tickets\nReason = "GB"
+
+' Step 2 to Step 3: General classification reads GB tickets
+TableMatch .down.> JobGeneral : **STEP 2 to 3**\nREAD matches\nWHERE Reason='GB'
+TableDetail .down.> JobGeneral : **STEP 2 to 3**\nREAD tickets\nWHERE Reason='GB'
+
+' Step 3: Write customer classification
+JobGeneral -down-> TableCust : **STEP 3**\nUPDATE CC\n"System Detect\nGroup Betting"
+
+' Step 2 to Step 4: Sport-specific classification reads GB tickets
+TableMatch .down.> JobBySport : **STEP 2 to 4**\nREAD matches\nWHERE Reason='GB'\nAND SportType\n='Saba Soccer'
+TableDetail .down.> JobBySport : **STEP 2 to 4**\nREAD tickets\nWHERE Reason='GB'
+
+' Step 4: Write customer classification (sport-specific)
+JobBySport -down-> TableCust : **STEP 4**\nUPDATE CC\n"Saba System Detect\nGroup Betting"
+
+' Web Page reads all data
+TableMatch -down-> WebPage : **SELECT**\n(Match List)
+TableDetail -down-> WebPage : **SELECT**\n(Ticket Details)
+TableCust -down-> WebPage : **SELECT**\n(Customer CC Status)
+DBMatchInfo -down-> WebPage : **SELECT**\n(Match Info)
+DBTrans -down-> WebPage : **SELECT**\n(All Tickets)
+
+' ============================================
+' NOTES
+' ============================================
+
+note bottom of TableCust
+    **Important Notes:**
+    - Step 3 & 4 both may classify same customer
+    - Step 4 (sport-specific) takes precedence
+    - Max 5-minute delay between steps
+    - Match visible on page after Step 2 completes
+end note
+
+@enduml

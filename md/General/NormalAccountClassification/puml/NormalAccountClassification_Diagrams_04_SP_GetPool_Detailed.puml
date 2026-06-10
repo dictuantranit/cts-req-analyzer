@@ -1,0 +1,126 @@
+@startuml NormalAccountClassification_SP_GetPool_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_NormalPool_Get - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_NormalPool_Get**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input/Output Parameters" {
+  :Declare OUTPUT parameter;
+  note right
+      @ScannedMaxId BIGINT OUTPUT
+      
+      Purpose: Track maximum ID processed
+      for cleanup operations
+  end note
+}
+
+partition "Get Unprocessed Customers from Normal Pool" {
+  :Query Normal Pool table;
+  note right
+      SELECT 
+        ID,
+        CustId,
+        IsRealtimeOnly,
+        ScanTaggingType,
+        ScanSpecialLicSubType,
+        Priority
+      INTO #tmpResult
+      FROM CustomerClassification_NormalPool
+      WHERE IsProcessed = 0
+      ORDER BY 
+        Priority DESC,    -- Higher priority first
+        ID ASC;          -- Then FIFO order
+      
+      **Table Structure**:
+      - ID (PK, IDENTITY): Incremental ID
+      - CustId (FK): Customer ID
+      - Priority (INT): Processing priority
+      - IsRealtimeOnly (BIT): Only realtime classification
+      - ScanTaggingType (INT): Special tagging logic
+      - ScanSpecialLicSubType (INT): 0=No LicSub, 1=Has LicSub
+      - IsProcessed (BIT): 0=Pending, 1=Processed
+      - CreatedDate (DATETIME): Timestamp
+      - FunctionId (INT): Source function
+      - GroupId (INT): Classification group
+  end note
+  
+  :Calculate ScannedMaxId;
+  note right
+      SELECT @ScannedMaxId = MAX(ID)
+      FROM #tmpResult;
+      
+      Used later for cleanup:
+      - DELETE WHERE ID <= @ScannedMaxId
+  end note
+}
+
+partition "Return Result Set" {
+  :Prepare result set;
+  note right
+      SELECT 
+        CustId,
+        IsRealtimeOnly,
+        ScanTaggingType,
+        ScanSpecialLicSubType
+      FROM #tmpResult
+      ORDER BY Priority DESC, ID ASC;
+      
+      **Why these fields?**
+      - CustId: Customer identifier
+      - IsRealtimeOnly: Skip daily logic if true
+      - ScanTaggingType: Special tagging requirements
+      - ScanSpecialLicSubType: LicSub handling flag
+  end note
+  
+  :Return ResultSet + OUTPUT parameter;
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpResult;
+  end note
+}
+
+note right
+  **Key Logic**:
+  1. Get unprocessed customers (IsProcessed=0)
+  2. Order by Priority DESC (higher priority first)
+  3. Then order by ID ASC (FIFO within priority)
+  4. Return customer info with classification flags
+  5. Output ScannedMaxId for cleanup
+  
+  **Priority System**:
+  - Higher priority = processed first
+  - Typical priorities:
+    * Realtime customers: Priority 200
+    * Daily customers: Priority 100
+    * Others: Priority 50
+  
+  **Tables Accessed**:
+  - CustomerClassification_NormalPool (READ)
+    * Main queue for classification
+    * Fed by Realtime and Daily jobs
+    * Processed by this job
+  
+  **Performance**:
+  - INDEX on IsProcessed, Priority, ID
+  - Fast filtering and ordering
+  - No record limit (processes all pending)
+  - Temp table for result set
+  
+  **Source Functions**:
+  - FunctionId = 1: Realtime
+  - FunctionId = 2: Daily
+  - FunctionId = 3: Others
+end note
+
+stop
+
+@enduml
+

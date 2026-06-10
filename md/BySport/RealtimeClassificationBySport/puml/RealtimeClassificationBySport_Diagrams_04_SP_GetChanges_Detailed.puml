@@ -1,0 +1,51 @@
+@startuml RealtimeClassificationBySport_SP_GetChanges_Detailed
+!theme plain
+title Realtime Classification By Sport - SP GetChanges Detailed Flow
+
+start
+:CTS_BySportNormalClassification_RealTime_GetChanges;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Table: CustomerClassification_BySport_RealtimeChanges
+    Parameter: @ScannedMaxId (OUTPUT)
+end note
+
+:Create Temp Table;
+note right
+    #tmpResult:
+    - Id (BIGINT PRIMARY KEY)
+    - CustId (INT)
+    - SportGroup (INT)
+end note
+
+:Get TOP Records from RealtimeChanges;
+note right
+    SELECT TOP 20000
+    c.ID, c.CustId, c.SportGroup
+    FROM CustomerClassification_BySport_RealtimeChanges AS c
+    ORDER BY c.ID ASC
+    INSERT INTO #tmpResult
+end note
+
+:Get Max ID;
+note right
+    SELECT @ScannedMaxId = MAX(ID)
+    FROM #tmpResult
+end note
+
+:Return Distinct Customers;
+note right
+    SELECT DISTINCT
+    CustId, SportGroup
+    FROM #tmpResult
+end note
+
+:Return ScannedMaxId;
+note right
+    @ScannedMaxId OUTPUT
+end note
+
+stop
+
+@enduml
+

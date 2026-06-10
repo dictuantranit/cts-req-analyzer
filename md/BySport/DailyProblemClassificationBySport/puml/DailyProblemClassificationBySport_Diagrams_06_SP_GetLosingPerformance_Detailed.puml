@@ -1,0 +1,94 @@
+@startuml DailyProblemClassificationBySport_SP_GetLosingPerformance_Detailed
+!theme plain
+title Daily Problem Classification By Sport - SP Get Losing Performance Detailed Flow
+
+start
+:CTS_ProblemAccountsClassification_BySport_Daily;
+note right
+    Database: bodb_VR2Model (SQL Server)
+    Tables: Temp Tables, bodb_dwrs
+    Parameters: @ListCustInfo (JSON), @FunctionId = 12
+end note
+
+:Create Temp Tables;
+note right
+    #tmpCustInfo:
+    - CustId, SportGroup
+    - CLUSTERED INDEX (CustId, SportGroup)
+    
+    #tmpRawData:
+    - CustId, SportGroup
+    - TurnoverRM, WinlossRM
+    - TurnoverORG, WinlossORG
+    - BetCount
+    - ActiveDaysCustID, ActiveDaysSportGroup
+    - WindaysCustID, WinDaysSportGroup
+    - ProcessedTime
+    - PRIMARY KEY (CustId, SportGroup)
+    
+    #tmpCustomerAccummulatedInfo:
+    - CustId, SportGroup
+    - TurnoverRM, WinlossRM
+    - BetCount, ActiveDays
+end note
+
+:Parse JSON Customer List;
+note right
+    INSERT INTO #tmpCustInfo
+    SELECT DISTINCT CustID, SportGroup
+    FROM OPENJSON(@ListCustInfo)
+end note
+
+:Get Accumulated Data;
+note right
+    EXEC bodb_dwrs.dbo.Acc_Rpt_CTS_GetCustAccumulatedInfo
+    @ListCustID, @isResetBalance = 0
+    Get customer accumulated statistics
+    from data warehouse
+    INSERT INTO #tmpRawData
+    (Accumulated data)
+end note
+
+:Filter by SportGroup;
+note right
+    DELETE FROM #tmpRawData
+    WHERE SportGroup NOT IN (145)
+    (Saba VR Soccer only)
+end note
+
+:Sum Data by CustID;
+note right
+    INSERT INTO #tmpCustomerAccummulatedInfo
+    SELECT
+      CustId
+      , 145 AS SportGroup
+      , SUM(TurnoverRM)
+      , SUM(WinlossRM)
+      , SUM(BetCount)
+      , MAX(ActiveDaysCustID)
+    FROM #tmpRawData
+    GROUP BY CustId
+end note
+
+:Classify WinlossStatus;
+note right
+    WinlossStatus Classification:
+    - LOSING (0): WinlossRM < -10000
+    - KEEPSTATE (1): -10000 <= WinlossRM < -5000
+    - WINNING (2): WinlossRM >= -5000
+end note
+
+:Return Results;
+note right
+    SELECT
+    CustId, SportGroup
+    , WinlossStatus
+    , TurnoverRM, WinlossRM
+    , BetCount, ActiveDays
+    FROM #tmpCustomerAccummulatedInfo
+end note
+
+stop
+
+@enduml
+

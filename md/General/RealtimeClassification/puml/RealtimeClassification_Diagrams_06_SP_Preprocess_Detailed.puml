@@ -1,0 +1,178 @@
+@startuml RealtimeClassification_SP_Preprocess_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_Realtime_Preprocess - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_Realtime_Preprocess**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @ListCustId (VARCHAR);
+  note right
+      Parameter: @ListCustId
+      Format: "123,456,789,1011,1213,..."
+      
+      Comma-separated customer IDs (Normal customers)
+  end note
+}
+
+partition "Parse Customer IDs" {
+  :Create temporary table;
+  note right
+      CREATE TABLE #tmpCustomers (
+        CustId BIGINT
+      );
+  end note
+  
+  :Parse comma-separated string;
+  note right
+      -- Split string by comma and insert
+      INSERT INTO #tmpCustomers (CustId)
+      SELECT CAST(value AS BIGINT)
+      FROM STRING_SPLIT(@ListCustId, ',')
+      WHERE TRIM(value) != '';
+      
+      SQL Server String Splitting:
+      - STRING_SPLIT (SQL Server 2016+)
+      - XML parsing (older versions)
+      - Custom split function
+  end note
+}
+
+partition "Get Priority" {
+  :Query Priority table;
+  note right
+      DECLARE @Priority INT;
+      
+      SELECT TOP 1 @Priority = Priority
+      FROM CustomerClassification_Priority
+      WHERE GroupId = 1          -- General Classification
+        AND FunctionId = 1       -- Realtime Function
+      ORDER BY Priority DESC;
+      
+      **Purpose**:
+      - Priority determines processing order
+      - Higher priority = processed first
+      - Realtime customers have higher priority
+      
+      **Table Structure**:
+      - GroupId: Classification group
+      - FunctionId: Function type
+      - Priority: Processing priority value
+  end note
+  
+  if (Priority IS NULL) then (yes)
+    :Set default Priority;
+    note right
+        SET @Priority = 100;  -- Default priority
+    end note
+  else (no)
+    :Use retrieved Priority;
+  endif
+}
+
+partition "Insert into Normal Pool" {
+  :Call NormalPool_Insert SP;
+  note right
+      EXEC CTS_GeneralNormalClassification_NormalPool_Insert
+        @CustomerList = #tmpCustomers,
+        @Priority = @Priority,
+        @FunctionId = 1,      -- Realtime
+        @GroupId = 1;         -- General
+      
+      **Purpose**:
+      - Insert customers into Normal Pool
+      - Queue for NormalAccountClassification job
+      - Assign priority for processing order
+  end note
+  
+  :Insert into NormalPool table;
+  note right
+      Inside NormalPool_Insert SP:
+      
+      INSERT INTO CustomerClassification_NormalPool
+        (CustId, Priority, FunctionId, GroupId, CreatedDate, IsProcessed)
+      SELECT 
+        tc.CustId,
+        @Priority,
+        @FunctionId,
+        @GroupId,
+        GETDATE(),
+        0           -- Not yet processed
+      FROM #tmpCustomers tc
+      LEFT JOIN CustomerClassification_NormalPool np
+        ON tc.CustId = np.CustId
+        AND np.IsProcessed = 0
+      WHERE np.CustId IS NULL;  -- Avoid duplicates
+      
+      **Duplicate Prevention**:
+      - LEFT JOIN to check existing unprocessed records
+      - Only insert if not already in pool
+  end note
+}
+
+partition "Logging (Optional)" {
+  :Log operation;
+  note right
+      INSERT INTO ProcessLog
+      VALUES (
+        GETDATE(),
+        'RealtimePreprocess',
+        @@ROWCOUNT,
+        @Priority
+      );
+  end note
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpCustomers;
+  end note
+}
+
+:Return success;
+note right
+  **Key Logic**:
+  1. Parse comma-separated customer IDs
+  2. Get Priority from Priority table (GroupId=1, FunctionId=1)
+  3. Call NormalPool_Insert to add customers to pool
+  4. Prevent duplicates (check IsProcessed=0)
+  5. Assign priority for processing order
+  
+  **Tables Accessed**:
+  - CustomerClassification_Priority (READ)
+    * GroupId (General=1)
+    * FunctionId (Realtime=1)
+    * Priority (Processing priority)
+  
+  - CustomerClassification_NormalPool (INSERT)
+    * CustId (PK)
+    * Priority (Processing order)
+    * FunctionId (Source function)
+    * GroupId (Classification group)
+    * CreatedDate (Timestamp)
+    * IsProcessed (0=Pending, 1=Processed)
+  
+  **Processing Flow**:
+  ```
+  Realtime → Normal Pool → NormalAccountClassification
+                          ↓
+                    Classification Applied
+                          ↓
+                    Push to MainDB
+  ```
+  
+  **Priority System**:
+  - Higher priority = processed first
+  - Realtime typically higher than Daily
+  - Ensures timely processing of active customers
+end note
+
+stop
+
+@enduml
+

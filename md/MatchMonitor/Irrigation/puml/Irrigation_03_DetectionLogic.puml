@@ -1,0 +1,210 @@
+@startuml Irrigation_DetectionLogic
+!theme plain
+title Match Monitor - Irrigation - Detection Logic (NO Association)
+
+start
+
+:Receive Match Group;
+note right
+  Input:
+  - MatchID, ScoreDiff, BettypeID, BetID, HDP, Betteam
+  - MaxSequenceID
+  
+  NOTE: NO Customer association!
+  Only analyze individual customers
+end note
+
+:Get All Tickets for Match;
+note right
+  SELECT from MatchMonitorStagingIrrigationNonLive
+  WHERE SequenceID <= MaxSequenceID
+    AND MatchID = ip_MatchID
+    AND ScoreDiff = ip_ScoreDiff
+    AND BettypeID = ip_BettypeID
+    AND BetID = ip_BetID
+    AND HDP = ip_HDP
+    AND Betteam = ip_Betteam
+  
+  Fields:
+  - SequenceID, TransID, CustID
+  - TransDate, Stake, Odds
+  - SignNumber = SIGN(Odds)
+end note
+
+:Get Rule Settings;
+note right
+  From MatchMonitorRuleSetting
+  WHERE RuleGroupID = 4 (Irrigation)
+    AND SportType = ip_SportType
+    AND RuleStatus = 1
+  
+  Settings:
+  - TimeStep: 180 seconds (3 minutes)
+  - TotalStake: $1000
+  - OddsSpread: 28%
+end note
+
+partition "Step 1: Get Old Groups (Previous Patterns)" {
+  :Get LastScannedSequenceID;
+  note right
+    From SystemParameter (ID = 125)
+    Tickets before this are "old"
+  end note
+  
+  :Calculate Old Customer Groups;
+  note right
+    For tickets WHERE SequenceID <= LastScannedSequenceID
+    GROUP BY CustID
+    
+    Per Customer:
+    - MaxTransDate (latest bet time)
+    - OldGroupID (existing group)
+    - TotalStake (sum)
+    - MinOdds, MaxOdds
+    - MinNegativeOdds, MinPositiveOdds
+    - SignNumber range
+  end note
+}
+
+partition "Step 2: Get New Groups (Current Batch)" {
+  :Calculate New Customer Groups;
+  note right
+    For tickets WHERE SequenceID > LastScannedSequenceID
+                 AND GroupID = 0 (not yet grouped)
+    GROUP BY CustID
+    
+    Per Customer:
+    - MinTransDate (earliest bet time)
+    - TotalStake (sum)
+    - MinOdds, MaxOdds
+    - MinNegativeOdds, MinPositiveOdds
+    - SignNumber range
+  end note
+}
+
+partition "Step 3: Merge Old + New Groups" {
+  :Check Time Gap;
+  note right
+    For each customer with both Old and New groups:
+    
+    TimeGap = NewGroup.MinTransDate - OldGroup.MaxTransDate
+    
+    IF TimeGap <= TimeStep (180 seconds)
+    THEN Merge into same group
+    ELSE Keep separate groups
+  end note
+  
+  if (Within TimeStep?) then (yes)
+    :Merge Old + New;
+    note right
+      Combine stats:
+      - TotalStake = Old + New
+      - Odds range = Combined range
+    end note
+  else (no)
+    :Keep Separate;
+  endif
+}
+
+partition "Step 4: Validate Detection Criteria" {
+  :Check Total Stake;
+  note right
+    TotalStake >= Threshold ($1000)
+  end note
+  
+  if (Stake sufficient?) then (yes)
+    :Check Odds Sign;
+    
+    if (Same Sign?) then (yes - all positive OR all negative)
+      :Calculate Same Sign Spread;
+      note right
+        Formula:
+        OddsSpread = |MAX(Odds) - MIN(Odds)| * 100
+        
+        Example:
+        Odds: 1.20, 0.95, 1.10
+        Spread = |1.20 - 0.95| * 100 = 25%
+      end note
+      
+      if (Spread >= 28%?) then (yes)
+        :DETECTED - Same Sign;
+        :Mark GroupID = 1;
+      else (no)
+        :Not Detected - Spread too low;
+      endif
+      
+    else (no - mixed positive AND negative)
+      :Calculate Mixed Sign Spread;
+      note right
+        Formula:
+        OddsSpread = ((1 - MIN(Positive)) + (1 - MIN(Negative))) * 100
+        
+        Example:
+        Odds: 1.20, -0.90, 0.85
+        MinPositive = 0.85
+        MinNegative = -0.90
+        
+        Spread = ((1 - 0.85) + (1 - 0.90)) * 100
+               = (0.15 + 0.10) * 100
+               = 25%
+      end note
+      
+      if (Spread >= 28%?) then (yes)
+        :DETECTED - Mixed Sign;
+        :Mark GroupID = 1;
+      else (no)
+        :Not Detected - Spread too low;
+      endif
+    endif
+    
+  else (no)
+    :Not Detected - Insufficient Stake;
+  endif
+}
+
+:Build Result List;
+note right
+  For each detected customer:
+  {
+    "CustID": 12345,
+    "GroupID": 1,
+    "TotalStake": 1500,
+    "OddsSpread": 35,
+    "TransIDList": "...",
+    "SequenceIDList": "...",
+    ...
+  }
+end note
+
+if (Any detections?) then (yes)
+  :Return: MatchRuleIrrigationCompletedModel[];
+else (no)
+  :Return: Empty list;
+endif
+
+stop
+
+note right
+  **KEY DIFFERENCES from Other Rules:**
+  
+  Group Betting / Saba GB / Hedging / Arbitrage / Parlay:
+  - HAVE Association Detection (Device/AI/IP)
+  - Link MULTIPLE customers together
+  
+  Irrigation:
+  - NO Association Detection ✅
+  - Analyze EACH customer independently ✅
+  - Focus on odds variation pattern ✅
+  - Simplest detection logic ✅
+  
+  **Detection Formula:**
+  
+  Same Sign:
+    |MAX(Odds) - MIN(Odds)| * 100 >= 28%
+  
+  Mixed Sign:
+    ((1 - MIN(+Odds)) + (1 - MIN(-Odds))) * 100 >= 28%
+end note
+
+@enduml
+

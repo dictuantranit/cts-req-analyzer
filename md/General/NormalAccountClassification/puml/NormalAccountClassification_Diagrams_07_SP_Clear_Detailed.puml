@@ -1,0 +1,249 @@
+@startuml NormalAccountClassification_SP_Clear_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_NormalPool_Clear - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_NormalPool_Clear**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive parameters;
+  note right
+      @ListCustId VARCHAR(MAX)
+      Format: "123,456,789,1011,1213,..."
+      Purpose: Specific customers to remove
+      
+      @ScannedMaxId BIGINT
+      Purpose: Batch cleanup threshold
+  end note
+}
+
+partition "Parse Customer ID List" {
+  :Create temporary table;
+  note right
+      CREATE TABLE #tmpCustIds (
+        CustId BIGINT
+      );
+  end note
+  
+  :Parse comma-separated string;
+  note right
+      INSERT INTO #tmpCustIds (CustId)
+      SELECT CAST(value AS BIGINT)
+      FROM STRING_SPLIT(@ListCustId, ',')
+      WHERE TRIM(value) != '' AND value IS NOT NULL;
+      
+      SQL Server String Splitting:
+      - STRING_SPLIT (SQL Server 2016+)
+      - Efficient for large lists
+      - Handles variable-length input
+  end note
+  
+  :Validate parsed IDs;
+  note right
+      -- Remove invalid IDs (if any)
+      DELETE FROM #tmpCustIds
+      WHERE CustId IS NULL OR CustId <= 0;
+      
+      -- Get count for logging
+      DECLARE @CustCount INT;
+      SELECT @CustCount = COUNT(*) FROM #tmpCustIds;
+  end note
+}
+
+partition "Strategy 1: Delete by Specific CustId" {
+  :Delete successfully processed customers;
+  note right
+      DELETE np
+      FROM CustomerClassification_NormalPool np
+      INNER JOIN #tmpCustIds tc
+        ON np.CustId = tc.CustId
+      WHERE np.IsProcessed = 0;
+      
+      **Purpose**:
+      - Remove customers that were successfully classified
+      - Specific deletion (by CustId list)
+      - Only delete unprocessed records (safety)
+      
+      **Why INNER JOIN?**
+      - Ensures we only delete customers in the list
+      - Prevents accidental mass deletion
+      - More precise than WHERE IN clause
+  end note
+  
+  :Get deleted count;
+  note right
+      DECLARE @DeletedByCustId INT = @@ROWCOUNT;
+      
+      Track how many customers removed
+      by specific CustId list
+  end note
+}
+
+partition "Strategy 2: Delete by ScannedMaxId" {
+  if (@ScannedMaxId > 0) then (yes)
+    :Delete by ID threshold;
+    note right
+        DELETE FROM CustomerClassification_NormalPool
+        WHERE ID <= @ScannedMaxId
+          AND IsProcessed = 0;
+        
+        **Purpose**:
+        - Cleanup entire processed batch
+        - Based on ID threshold
+        - Handles any missed records
+        
+        **Why this strategy?**
+        - ScannedMaxId = MAX(ID) from Get query
+        - Everything <= ScannedMaxId was retrieved
+        - Should be processed (or failed)
+        - Clean up to maintain pool health
+    end note
+    
+    :Get deleted count;
+    note right
+        DECLARE @DeletedByMaxId INT = @@ROWCOUNT;
+        
+        Track how many customers removed
+        by ScannedMaxId threshold
+    end note
+  else (no)
+    :Skip MaxId cleanup;
+    note right
+        @ScannedMaxId = 0 means no records
+        were retrieved from pool
+    end note
+  endif
+}
+
+partition "Dual Cleanup Strategy Rationale" {
+  note left
+    **Why 2 deletion strategies?**
+    
+    **Strategy 1: By CustId List**
+    - Deletes successfully processed customers
+    - Precise deletion
+    - Main cleanup method
+    
+    **Strategy 2: By ScannedMaxId**
+    - Cleanup "orphaned" records
+    - Handles partial failures
+    - Safety net
+    
+    **Example Scenario**:
+    - Retrieved 10000 customers (ID 1-10000)
+    - ScannedMaxId = 10000
+    - Successfully classified 9950 customers
+    - Strategy 1: Deletes 9950 by CustId
+    - Strategy 2: Deletes remaining 50 by MaxId
+    
+    **Benefits**:
+    - Comprehensive cleanup
+    - Handles failures gracefully
+    - Prevents pool bloat
+    - Maintains data integrity
+  end note
+}
+
+partition "Update Pool Statistics (Optional)" {
+  :Update pool health metrics;
+  note right
+      -- Track cleanup statistics
+      INSERT INTO NormalPoolStatistics (
+        CleanupDate,
+        DeletedByCustIdCount,
+        DeletedByMaxIdCount,
+        ScannedMaxId
+      )
+      VALUES (
+        GETDATE(),
+        @DeletedByCustId,
+        @DeletedByMaxId,
+        @ScannedMaxId
+      );
+      
+      **Purpose**: Monitor pool health and cleanup efficiency
+  end note
+}
+
+partition "Logging" {
+  :Log cleanup operation;
+  note right
+      -- Optional: Log to application or file
+      IF (@DeletedByCustId > 0 OR @DeletedByMaxId > 0)
+      BEGIN
+        INSERT INTO ProcessLog (
+          ProcessName,
+          ProcessDate,
+          RecordsProcessed,
+          Message
+        )
+        VALUES (
+          'NormalPoolClear',
+          GETDATE(),
+          @DeletedByCustId + @DeletedByMaxId,
+          'Cleared ' + CAST(@DeletedByCustId AS VARCHAR) + ' by CustId, ' +
+          CAST(@DeletedByMaxId AS VARCHAR) + ' by MaxId'
+        );
+      END
+  end note
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpCustIds;
+  end note
+}
+
+:Return success;
+
+note right
+  **Key Logic**:
+  1. Parse comma-separated customer IDs
+  2. Delete by specific CustId list (successful processing)
+  3. Delete by ScannedMaxId threshold (batch cleanup)
+  4. Dual strategy ensures comprehensive cleanup
+  5. Track statistics for monitoring
+  
+  **Tables Accessed**:
+  - CustomerClassification_NormalPool (DELETE)
+    * Main queue table
+    * Remove processed customers
+    * Keep pool clean and efficient
+  
+  **Deletion Strategies**:
+  - **Strategy 1 (CustId)**: Precision cleanup
+    * Only successfully processed customers
+    * Preserves failed/partial records for retry
+  
+  - **Strategy 2 (MaxId)**: Batch cleanup
+    * Removes all retrieved records up to MaxId
+    * Handles failures and orphaned records
+    * Safety net for pool health
+  
+  **Performance**:
+  - STRING_SPLIT: Fast parsing
+  - INNER JOIN: Efficient deletion
+  - Indexed on ID and CustId: Fast lookup
+  - Dual strategy: Minimal overhead
+  
+  **Pool Health**:
+  - Prevents pool bloat
+  - Removes processed records promptly
+  - Handles partial failures
+  - Maintains optimal query performance
+  
+  **Safety**:
+  - Only deletes IsProcessed=0 records
+  - Preserves processed records (IsProcessed=1)
+  - No risk of deleting active/pending records
+end note
+
+stop
+
+@enduml
+

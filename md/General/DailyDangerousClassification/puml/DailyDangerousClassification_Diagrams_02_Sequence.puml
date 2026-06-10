@@ -1,0 +1,257 @@
+@startuml DailyDangerousClassification_Sequence
+title Daily Dangerous Classification - Sequence Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequence {
+  ArrowColor Black
+  ActorBorderColor Black
+  LifeLineBorderColor Black
+  LifeLineBackgroundColor White
+  
+  ParticipantBorderColor Black
+  ParticipantBackgroundColor White
+  ParticipantFontSize 12
+  
+  BoxBorderColor Black
+  BoxBackgroundColor #F0F0F0
+}
+
+actor Scheduler as scheduler
+participant "ClassificationJob\nController" as controller
+participant "DailyDangerous\nClassificationJobService" as jobService
+participant "DailyDangerous\nClassificationService" as service
+participant "DailyDangerous\nClassificationDataAccess" as dataAccess
+participant "ProblemAccount\nServices" as paService
+participant "CustClassToMainDB\nService" as mainDBService
+participant "SystemParameter\nServices" as sysParamService
+database "CTS_DataCenter\n(MySQL)" as mysql
+database "AI/ML Detection\nSystem" as aiSystem
+
+scheduler -> controller : POST /scanningDailyDangerousClassification\n(batchSize, isLicensee)
+activate controller
+note right
+  isLicensee:
+  - true: Deposit customers
+  - false: Credit customers
+end note
+
+controller -> jobService : Execute(batchSize, isLicensee)
+activate jobService
+
+jobService -> jobService : Prepare PushDataToExternalEntity
+note right
+  Parameters:
+  - RoleGroup: Member
+  - ExternalBatchSize: batchSize
+  - IsUpdateDangerToMainDB: true
+end note
+
+== Do-While Loop Start ==
+note over jobService
+  Pagination loop
+  Continue until LastCustID = 0
+end note
+
+loop Do-While (isContinue = true)
+  
+  == Step 1: Get Dangerous Classification ==
+  jobService -> service : GetDangerousClassification(isLicensee)
+  activate service
+  
+  service -> dataAccess : GetDangerousClassification(isLicensee)
+  activate dataAccess
+  
+  dataAccess -> mysql : CTS_DC_DangerousDetection_GetLatest\n(ip_IsLicensee)
+  activate mysql
+  note right
+    **Input**: ip_IsLicensee (bool)
+    
+    **Query Logic**:
+    - FROM DangerousDetection
+    - WHERE IsLicensee = @ip_IsLicensee
+    - AND CustID > @LastCustID (from system params)
+    - AND ClassifiedDate > @LastScannedDate
+    - AND ClassifiedScore > @Threshold
+    - ORDER BY CustID
+    - LIMIT (batch, e.g., 10000)
+    
+    **Data Source**: AI/ML Detection System ⭐
+  end note
+  
+  mysql -> aiSystem : (Data previously stored by AI/ML)
+  note right
+    **AI/ML Detection**:
+    - Dangerous score calculation
+    - ML model prediction
+    - Risk scoring
+    - Stored in DangerousDetection table
+  end note
+  
+  mysql --> dataAccess : **Multiple Result Sets**:\n1. DangerousToCCLastScannedEntity\n2. DangerousToCCEntity[]
+  deactivate mysql
+  note right
+    **Result Set 1**: Pagination Info
+    - LastCustID (long)
+    - LastScannedDate (DateTime?)
+    
+    **Result Set 2**: Dangerous Customers
+    - CustID, CTSCustID
+    - CategoryID, CategoryGroup
+    - ClassifiedScore, ClassifiedDate
+    - SubscriberID, RoleID
+  end note
+  
+  dataAccess -> dataAccess : Build DangerousToCCModel
+  dataAccess --> service : DangerousToCCModel
+  deactivate dataAccess
+  
+  service --> jobService : DangerousToCCModel
+  deactivate service
+
+  == Step 2: Check Continue Condition ==
+  jobService -> jobService : isContinue = (LastCustID > 0)
+  
+  alt If isContinue = true
+    
+    == Step 3: Transform to PA Entities ==
+    jobService -> service : InsertDangerousClassification(dangerousCCs, isLicensee, paras)
+    activate service
+    
+    service -> service : Transform DangerousToCCEntity → InsertProblemAccountEntity
+    note right
+      **Transformation**:
+      - Map all fields
+      - IsLicensee: from parameter
+      - CreatedBy: StarixITId
+      - **IsFromAI: true** ⭐
+      - IsFromCTS: false
+      - IsFromTVS: false
+      - IsFromTW: false
+    end note
+    
+    service -> service : Chunk by externalBatchSize
+    
+    == Step 4: Batch Processing ==
+    loop For each chunk
+      
+      service -> paService : InsertProblemAccountPackage(pasChunk, FunctionId, CCInputFlow, ...)
+      activate paService
+      note right
+        **Insert PA Classification**:
+        - FunctionId: DailyDangerousClassification
+        - CCInputFlow: Potential
+        - Insert into CTSCustomerClassification
+        - Apply PA rules
+        - Returns: Inserted CustIDs
+      end note
+      
+      paService -> mysql : Insert PA Classification
+      activate mysql
+      mysql --> paService : Inserted CustIDs
+      deactivate mysql
+      
+      paService --> service : CustIDs[]
+      deactivate paService
+      
+      == Step 5: Push to External ==
+      service -> mainDBService : PushExternalPackageByCustId(custIDs, paras)
+      activate mainDBService
+      note right
+        **Push to MainDB**:
+        - Input: CustIDs
+        - Parameters: RoleGroup, ExternalBatchSize
+        - IsUpdateDangerToMainDB: true
+        - Makes dangerous classification visible
+      end note
+      
+      mainDBService -> mainDBService : Push to external API
+      mainDBService --> service : Success
+      deactivate mainDBService
+      
+    end
+    
+    service --> jobService : true (success)
+    deactivate service
+    
+    == Step 6: Update System Parameters ==
+    jobService -> sysParamService : UpdateTimingExecution(LastCustID, ParameterKey)
+    activate sysParamService
+    note right
+      **Parameter Key** (based on isLicensee):
+      - true: DangerousScoreClassification_Deposit_LastCustID
+      - false: DangerousScoreClassification_Credit_LastCustID
+    end note
+    
+    sysParamService -> mysql : UPDATE CTS_SystemParameter\nSET Value = @LastCustID
+    activate mysql
+    mysql --> sysParamService : void
+    deactivate mysql
+    sysParamService --> jobService : void
+    deactivate sysParamService
+    
+    jobService -> sysParamService : UpdateTimingExecution(LastScannedDate, ParameterKey)
+    activate sysParamService
+    note right
+      **Parameter Key** (based on isLicensee):
+      - true: DangerousScoreClassification_Deposit_LastScannedDate
+      - false: DangerousScoreClassification_Credit_LastScannedDate
+    end note
+    
+    sysParamService -> mysql : UPDATE CTS_SystemParameter\nSET Value = @LastScannedDate
+    activate mysql
+    mysql --> sysParamService : void
+    deactivate mysql
+    sysParamService --> jobService : void
+    deactivate sysParamService
+    
+  else isContinue = false
+    note over jobService
+      No more dangerous customers
+      Exit loop
+    end note
+  end
+  
+  == Loop Condition Check ==
+  jobService -> jobService : Evaluate while (isContinue)
+  
+end
+
+== Job Complete ==
+jobService --> controller : true
+deactivate jobService
+controller --> scheduler : true
+deactivate controller
+
+note bottom
+  **Key Flow Points**:
+  
+  1. **AI/ML Integration**:
+     - Dangerous customers detected by AI/ML system
+     - Stored in DangerousDetection table
+     - Retrieved by this job for PA classification
+  
+  2. **Multiple Result Sets**:
+     - First: Pagination info (LastCustID, LastScannedDate)
+     - Second: Dangerous customers to process
+  
+  3. **Transformation**:
+     - DangerousToCCEntity → InsertProblemAccountEntity
+     - IsFromAI = true (marks AI detection source)
+  
+  4. **Batch Processing**:
+     - Chunk by externalBatchSize
+     - Insert PA + Push to MainDB per chunk
+  
+  5. **Separate Tracking**:
+     - Licensee: Deposit_LastCustID, Deposit_LastScannedDate
+     - Credit: Credit_LastCustID, Credit_LastScannedDate
+  
+  6. **Pagination**:
+     - LastCustID: Primary pagination key
+     - LastScannedDate: Secondary filter
+     - System parameters survive job restarts
+end note
+
+@enduml
+

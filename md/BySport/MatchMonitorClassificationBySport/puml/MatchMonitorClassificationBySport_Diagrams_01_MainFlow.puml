@@ -1,0 +1,96 @@
+@startuml MatchMonitorClassificationBySport_MainFlow
+!theme plain
+title Match Monitor Classification By Sport - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationBySportJobs/ClassifyMatchMonitorBySport
+    Parameter: batchSize
+end note
+
+:MatchMonitorClassificationBySportJobService.Execute(batchSize);
+:ClassifyMatchMonitor(batchSize);
+  :Get MatchID from SystemParameter (ParameterID = 199);
+  if (MatchID = 0?) then (yes)
+    :Get First Unclassified Match;
+    note right
+        Conditions:
+        - SportType = 1 (Soccer)
+        - LeagueGroupID = 42
+        - ClassifyStatusBySport = 2 (Pending)
+        - Order by KickOffTime ASC
+    end note
+    :Update SystemParameter with MatchID;
+  else (no)
+  endif
+  :Determine SportGroup;
+  note right
+    SportGroup = 145 if SportType = 1 AND LeagueGroupID = 42
+    Otherwise = 0
+  end note
+  :Call CTS_DC_CustClassification_BySport_MatchMonitor_Classify [SP];
+  note right
+    Parameters:
+    - ip_BatchSize
+    Returns:
+    - CustInfos (CustID, CTSCustID, MatchID, SportGroup, etc.)
+    - MMDetailIDList
+    - MatchID
+  end note
+
+if (Has Customers?) then (yes)
+  :Convert to InsertProblemAccountBySportEntity;
+  :InsertProblemAccount();
+    :GetPALosingBySport();
+      :Call CTS_ProblemAccountsClassification_BySport_Daily [SP];
+      note right
+        Get losing performance data:
+        - BetCount
+        - ActiveDays
+        - TurnoverRM
+        - WinlossRM
+        - WinlossStatus
+        - PerformanceTime
+      end note
+    :CombinePAWithLosingPerformance();
+    :InsertCustomerClassificationBySport();
+      :Call CTS_DC_CustClassification_BySport_Insert [SP];
+      note right
+        InputFlowID = 335 (BySportInsertPA)
+        Steps:
+        1. Insert_GetInfo - Parse JSON
+        2. Insert_Process - Process classification
+        3. Insert_Complete - Complete insertion
+      end note
+    :PushCCBySportToMainDB();
+      :GetCustomerClassificationBySports();
+      :RetryPushCCBySportToMainDB();
+        :UpdateCustomerClassificationBySport [MainDB SP];
+        note right
+          Push to Main Database
+          Retry up to 3 times
+        end note
+else (no)
+  note right
+    No customers to classify
+  end note
+endif
+
+:ClassifyCompletedMatchMonitor();
+  :Call CTS_DC_CustClassification_BySport_MatchMonitor_Completed [SP];
+  note right
+    Parameters:
+    - ip_MatchID
+    - ip_MMDetailsIDList
+    Updates:
+    - MatchMonitorDetails.ClassifyStatusBySport = 1 (Completed)
+    - If no MMDetailsIDList: Update MatchMonitor.ClassifyStatusBySport = 1
+    - Reset SystemParameter.ParameterValue = 0
+  end note
+
+:Return Success;
+stop
+
+@enduml
+

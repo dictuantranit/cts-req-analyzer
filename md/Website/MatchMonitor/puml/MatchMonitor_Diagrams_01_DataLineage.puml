@@ -1,0 +1,238 @@
+@startuml MatchMonitor_DataLineage
+title Match Monitor Page - Data Lineage & Dependencies
+
+skinparam rectangle {
+    BackgroundColor<<BackgroundJob>> #FFE4B5
+    BackgroundColor<<Database>> #E8F5E9
+    BackgroundColor<<WebPage>> #E3F2FD
+    BackgroundColor<<ExternalDB>> #FFF9C4
+}
+
+skinparam note {
+    BackgroundColor #FFFACD
+    BorderColor #F0E68C
+}
+
+!define CLOUDBLUE #E3F2FD
+!define JOBCOLOR #FFE4B5
+!define DBCOLOR #E8F5E9
+!define WEBCOLOR #E3F2FD
+
+' Background Jobs Section
+package "Background Jobs (Scheduled)" {
+    rectangle "MatchMonitorClassification\nBySport\n(md/BySport)" <<BackgroundJob>> as JobBySport
+    note right of JobBySport
+        **Run Frequency**: Every 5 minutes
+        **Purpose**: Detect group betting by sport
+        **Processing**:
+        - Scan matches by sport type
+        - Detect suspicious betting patterns
+        - Classify customers as PA
+        - Assign specific CC categories
+    end note
+    
+    rectangle "MatchMonitorClassification\n(General)\n(md/General)" <<BackgroundJob>> as JobGeneral
+    note right of JobGeneral
+        **Run Frequency**: Every 5 minutes
+        **Purpose**: General match monitoring
+        **Processing**:
+        - Cross-sport detection
+        - Multi-bettype analysis
+        - Customer classification (CC)
+        - Problem Account marking
+        - One match at a time (FIFO queue)
+    end note
+}
+
+' Database Tables Section
+package "Database (MySQL - CTS_DataCenter)" {
+    database "CTSMatchMonitor" <<Database>> as TableMatch
+    note right of TableMatch
+        **Primary Table**
+        - MatchID (PK)
+        - SportType, BetTypeID, BetID
+        - Market, Reason
+        - IsVerified, VerifiedBy
+        - FraudTrans (comma-separated)
+        - FraudRefno (parlay)
+        - EventDate, ScanDate
+        - TicketType (Single/Parlay)
+    end note
+    
+    database "CTSCustomerClassification" <<Database>> as TableCust
+    note right of TableCust
+        **Customer CC Table**
+        - CustID (PK)
+        - CategoryID (CC type)
+        - CategoryName
+        - SportGroupID
+        - IsPA (Problem Account)
+        - ProbationEndDate
+        - LastModifiedDate
+    end note
+    
+    database "CTSMatchMonitorDetail" <<Database>> as TableDetail
+    note right of TableDetail
+        **Match Detail**
+        - ID (PK), MatchID (FK)
+        - CustID, TransID
+        - Refno (parlay)
+        - BetChoice
+        - VerifiedBy, VerifiedDate
+    end note
+}
+
+package "Database (SQL Server - bodb_VR2Model)" {
+    database "Match Info\n(MainDB)" <<ExternalDB>> as MainDB
+    note right of MainDB
+        **Match Master Data**
+        - MatchID
+        - HomeName, AwayName
+        - LeagueName
+        - KickOffTime
+        - MatchSection
+        - DataSource
+    end note
+    
+    database "Transaction\n(MainDB)" <<ExternalDB>> as TransDB
+    note right of TransDB
+        **Betting Transactions**
+        - TransID, Refno
+        - CustID
+        - BetAmount, BetChoice
+        - TransDate, IsVoid
+    end note
+}
+
+' Web Page Section
+package "Web Application (ASP.NET MVC)" {
+    rectangle "Match Monitor Page\n(Website/MatchMonitor)" <<WebPage>> as WebPage
+    note bottom of WebPage
+        **Main Features**:
+        1. **Search Matches**: Display dangerous matches
+        2. **View Details**: Show fraudulent tickets
+        3. **Verify Trans**: PIC verify suspicious bets
+        4. **Association Detection**: Manual group detection
+        5. **Mark PA**: Mark customers as Problem Account
+        6. **Export Excel**: Export match analysis
+        
+        **User Roles**:
+        - Monitor Team: View & verify
+        - Host Team: Full control (Hold Key, Mark PA)
+    end note
+}
+
+' Data Flow - Write Operations (Jobs → Database)
+JobBySport -down-> TableMatch : **INSERT/UPDATE**\n(Write Match Detection)
+JobBySport -down-> TableDetail : **INSERT**\n(Write Fraud Tickets)
+JobBySport -down-> TableCust : **UPDATE**\n(Classify Customer CC)
+
+JobGeneral -down-> TableMatch : **INSERT/UPDATE**\n(Write Match Detection)
+JobGeneral -down-> TableDetail : **INSERT**\n(Write Fraud Tickets)
+JobGeneral -down-> TableCust : **UPDATE**\n(Classify Customer CC)
+
+note on link
+    **Data Written by Jobs**:
+    1. Detected matches → CTSMatchMonitor
+    2. Fraud ticket list → CTSMatchMonitorDetail
+    3. Customer classification → CTSCustomerClassification
+    
+    **Classification Logic**:
+    - Match has multiple tickets
+    - Job runs detection rules
+    - If rules satisfied:
+      * CustID with ticket is marked as CC (PA)
+      * Assign specific CC category
+      * Update customer classification
+end note
+
+' Data Flow - Read Operations (Database → Web Page)
+TableMatch -down-> WebPage : **SELECT**\n(Read Match List)
+TableDetail -down-> WebPage : **SELECT**\n(Read Ticket Details)
+TableCust -down-> WebPage : **SELECT**\n(Read Customer CC Info)
+MainDB -down-> WebPage : **SELECT**\n(Read Match Info)
+TransDB -down-> WebPage : **SELECT**\n(Read All Tickets)
+
+note on link
+    **Stored Procedures Used**:
+    
+    **Main Page**:
+    - CTS_DC_MatchMonitor_Get
+      → Get matches by scan/event date
+      → Filter by sport, bettype, reason
+      → Join with CTSCustomerClassification
+    
+    **Detail Page**:
+    - CTS_DC_MatchMonitorDetail_Get
+      → Get fraud tickets for match
+      → Include customer CC info
+    - CTS_Rpt_MatchMonitor_MatchInfo
+      → Get match details from MainDB
+      → HomeName, AwayName, League, etc.
+    - CTS_Rpt_MatchMonitor_AllTickets_Get
+      → Get all tickets (not just fraud)
+      → From MainDB Transaction table
+end note
+
+' Cross-References
+note right of JobBySport
+    **Cross-Reference**:
+    📂 md/BySport/MatchMonitorClassificationBySport
+    
+    **Related Flows**:
+    - Detection rules by sport
+    - Category assignment logic
+    - Push to external systems
+end note
+
+note right of JobGeneral
+    **Cross-Reference**:
+    📂 md/General/MatchMonitorClassification
+    ✅ **Status**: Flow chart đã tạo
+    
+    **Key Features**:
+    - FIFO queue (one match at a time)
+    - 2 jobs: UpdateStatus + Classify
+    - General detection rules
+    - Cross-sport analysis
+    - Push to MainDB included
+end note
+
+' Data Freshness
+note bottom of TableMatch
+    **Data Freshness**:
+    - **Match data**: 5 minutes (job frequency)
+    - **Customer CC**: Real-time (updated by jobs)
+    - **Match info**: Real-time (from MainDB)
+    - **Transaction data**: Real-time (from MainDB)
+    
+    **Data Latency**:
+    - Web page shows data with max 5-min delay
+    - Depends on background job execution
+end note
+
+' Key Concepts
+note top of TableCust
+    **Customer Classification (CC)**:
+    
+    **Concept**:
+    - CC = Customer Class = Problem Account category
+    - Each customer can have specific CC type
+    - CC assigned based on betting behavior
+    
+    **Flow**:
+    1. MatchID has multiple tickets
+    2. Background job runs detection
+    3. If rules satisfied:
+       → CustID with ticket → marked as CC (PA)
+       → Assign specific CC category
+       → Example: "Group Betting", "Sharp Player", etc.
+    
+    **Categories**:
+    - Normal, PotentialPA, PA, Probation
+    - Sport-specific classifications
+    - Risk level indicators
+end note
+
+@enduml
+

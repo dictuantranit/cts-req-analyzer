@@ -1,0 +1,251 @@
+@startuml AIRobotDetection_Sequence
+title AI Robot Detection - Sequence Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam sequence {
+  ArrowColor Black
+  ActorBorderColor Black
+  LifeLineBorderColor Black
+  LifeLineBackgroundColor White
+  
+  ParticipantBorderColor Black
+  ParticipantBackgroundColor White
+  ParticipantFontSize 12
+  
+  BoxBorderColor Black
+  BoxBackgroundColor #F0F0F0
+}
+
+actor Scheduler as scheduler
+participant "ClassificationJob\nController" as controller
+participant "RobotAccountInsert\nJobService" as jobService
+participant "RobotAIDetection\nService" as service
+participant "RobotAIDetection\nDataAccess" as dataAccess
+participant "SystemParameter\nServices" as sysParamService
+participant "ProblemAccount\nServices" as paService
+participant "CustClassToMainDB\nService" as mainDBService
+database "CTS_DataCenter\n(MySQL)" as mysql
+database "AI/ML Robot\nDetection System" as aiSystem
+
+scheduler -> controller : POST /robotAIDetection\n(batchExternalSize, batchInternalSize)
+activate controller
+
+controller -> jobService : ScanningAIRobotClassification(batchExternalSize, batchInternalSize)
+activate jobService
+
+jobService -> jobService : Validate batch sizes > 0
+jobService -> jobService : InsertAIRobotClassification()
+
+== Step 1: Initialize ==
+jobService -> service : Start()
+activate service
+service -> service : Initialize robotDetections list
+service --> jobService : this
+deactivate service
+
+== Step 2: Get AI Robot Detections ==
+jobService -> service : GetRobotDetections(RobotDetection_LastID)
+activate service
+
+service -> sysParamService : GetLastScannedId(RobotDetection_LastID)
+activate sysParamService
+sysParamService -> mysql : SELECT Value FROM CTS_SystemParameter\nWHERE ParameterKey = 'RobotDetection_LastID'
+activate mysql
+note right
+  Get last processed RobotDetectionID
+  For incremental pagination
+end note
+mysql --> sysParamService : lastRobotAIID (long)
+deactivate mysql
+sysParamService --> service : lastRobotAIID
+deactivate sysParamService
+
+alt If lastRobotAIID > 0
+  service -> dataAccess : GetRobotDetections(lastRobotAIID)
+  activate dataAccess
+  
+  dataAccess -> mysql : CTS_DC_RobotDetection_GetLatest\n(@ip_RobotDetectionLastID)
+  activate mysql
+  note right
+    **Query Logic**:
+    - FROM RobotDetection
+    - WHERE RobotDetectionID > @lastRobotAIID
+    - ORDER BY RobotDetectionID
+    - LIMIT (batch size)
+    
+    **Data Source**: AI/ML Detection System ⭐
+  end note
+  
+  mysql -> aiSystem : (Data previously stored by AI/ML)
+  note right
+    **AI/ML Robot Detection**:
+    - Automated betting pattern analysis
+    - High-frequency detection
+    - ML model predictions
+    - Stored in RobotDetection table
+  end note
+  
+  mysql --> dataAccess : RobotAIEntity[]
+  deactivate mysql
+  note right
+    **Result**:
+    - RobotDetectionID (pagination)
+    - CustID
+    - CategoryID (Robot category)
+    - LastModifiedDate
+  end note
+  
+  dataAccess --> service : RobotAIEntity[]
+  deactivate dataAccess
+  
+  service -> service : Store robotDetections
+end
+
+service --> jobService : this
+deactivate service
+
+== Step 3: Batch Processing ==
+alt If robotDetections.Any()
+  jobService -> service : InsertAIRobotPackage(batchInternalSize, pushConfig)
+  activate service
+  
+  service -> service : Chunk robotDetections by internalSize
+  
+  loop For each robotChunk
+    
+    == Transform to PA Entity ==
+    service -> service : Transform RobotAIEntity → InsertProblemAccountEntity
+    note right
+      **Transformation**:
+      new InsertProblemAccountEntity(robotAIEntity)
+      - CustID, CategoryID
+      - Robot-specific fields
+    end note
+    
+    == Insert Robot PA ==
+    service -> paService : InsertProblemAccountPackage(insertedPA, FunctionId, CCInputFlow, ...)
+    activate paService
+    note right
+      **Insert Robot Classification**:
+      - FunctionId: RobotUserJob
+      - CCInputFlow: InsertPACategory
+      - Insert into CTSCustomerClassification
+      - Robot category
+    end note
+    
+    paService -> mysql : Insert Robot PA Classification
+    activate mysql
+    mysql --> paService : Inserted CustIDs
+    deactivate mysql
+    
+    paService --> service : CustIDs[]
+    deactivate paService
+    
+    == Push to MainDB ==
+    alt If custIds.Any()
+      service -> mainDBService : PushExternalPackageByCustId(custIds, pushConfig)
+      activate mainDBService
+      note right
+        **Push Parameters**:
+        - RoleGroup: Member
+        - IsUpdateDangerToMainDB: true
+        - IsSyncAFCData: false (no AFC for robots)
+      end note
+      
+      mainDBService -> mainDBService : Push to external API
+      mainDBService --> service : isSuccess (bool)
+      deactivate mainDBService
+      
+      alt If push failed
+        service --> jobService : false
+        jobService -> controller : false
+        controller -> scheduler : false
+        note right
+          **Push Failed**:
+          Stop processing
+          Return false
+        end note
+      end
+    end
+    
+    == Throttling ==
+    service -> service : Thread.Sleep(RobotUsers_SleepTimes)
+    note right
+      **Throttling** ⭐:
+      - Sleep between chunks
+      - Prevents database overload
+      - Prevents API overload
+      - Smooth processing
+    end note
+    
+  end
+  
+  service --> jobService : true (success)
+  deactivate service
+end
+
+== Step 4: Update System Parameter ==
+alt If robotDetections.Any()
+  jobService -> service : UpdateLastScannedId(RobotDetection_LastID)
+  activate service
+  
+  service -> service : Get MAX(RobotDetectionID) from robotDetections
+  
+  alt If lastAIRobotID > 0
+    service -> sysParamService : UpdateTimingExecution(lastAIRobotID.ToString(), RobotDetection_LastID)
+    activate sysParamService
+    
+    sysParamService -> mysql : UPDATE CTS_SystemParameter\nSET Value = @lastAIRobotID\nWHERE ParameterKey = 'RobotDetection_LastID'
+    activate mysql
+    note right
+      **Update Pagination**:
+      Store last processed ID
+      for next job run
+    end note
+    mysql --> sysParamService : void
+    deactivate mysql
+    
+    sysParamService --> service : void
+    deactivate sysParamService
+  end
+  
+  service --> jobService : this
+  deactivate service
+end
+
+== Job Complete ==
+jobService --> controller : true (success)
+deactivate jobService
+controller --> scheduler : true
+deactivate controller
+
+note bottom
+  **Key Flow Points**:
+  
+  1. **AI/ML Integration**:
+     - Robot customers detected by AI/ML system
+     - Stored in RobotDetection table
+     - Retrieved for PA classification
+  
+  2. **ID-Based Pagination**:
+     - Uses RobotDetectionID for incremental processing
+     - System parameter stores last processed ID
+     - WHERE RobotDetectionID > @LastID
+  
+  3. **Batch Processing with Throttling**:
+     - Chunk by internalSize
+     - Insert PA + Push to MainDB per chunk
+     - Sleep between chunks (throttling)
+  
+  4. **No AFC Sync**:
+     - IsSyncAFCData = false
+     - Robot customers don't sync with AFC
+  
+  5. **Inheritance**:
+     - Extends ProblemAccountServices
+     - Reuses InsertProblemAccountPackage method
+end note
+
+@enduml
+

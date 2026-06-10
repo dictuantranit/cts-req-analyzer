@@ -1,0 +1,159 @@
+@startuml RealtimeCheckChangeClassification_Sequence
+!theme plain
+title Realtime Check Change Classification - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationJob\nController" as Controller
+participant "RealtimeCheckChange\nJobService" as JobService
+participant "RealtimeCheckChange\nService" as Service
+participant "RealtimeCheckChange\nDataAccess" as DataAccess
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "MySQL\nCTS_Archive" as ArchiveDB
+
+Scheduler -> Controller: POST /api/classificationJobs/realtimeCheckChanges\nbatchSize
+activate Controller
+
+Controller -> JobService: Execute(batchSize)
+activate JobService
+
+' Step 1: CheckChange
+JobService -> Service: CheckChange()
+activate Service
+
+Service -> DataAccess: CheckChange()
+activate DataAccess
+
+DataAccess -> DataAccess: Create RealtimeCheckChangeCriteria
+DataAccess -> VR2DB: EXEC CTS_NormalClassification_RealTime_CheckChanges\n@NextScannedDateTime1-4 OUTPUT
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Detect customers with transaction changes
+    - Separate Member vs Agency
+    - Return 2 ResultSets:
+      * CustInfos (Member)
+      * CustInfosAgency (Agency)
+    - Output 4 next scan time slots
+end note
+VR2DB --> DataAccess: ResultSet 1: CustInfos (Member)\nResultSet 2: CustInfosAgency (Agency)\nNextScannedDateTime1-4
+deactivate VR2DB
+
+DataAccess -> DataAccess: Map to RealtimeCheckChangeModel
+DataAccess --> Service: RealtimeCheckChangeModel
+deactivate DataAccess
+
+Service --> JobService: RealtimeCheckChangeModel
+deactivate Service
+
+' Step 2: Update Member LastTransDate
+JobService -> Service: UpdateLastTransDate(CustInfos, batchSize)
+activate Service
+
+alt Has Member Customers
+    Service -> Service: Chunk CustInfos by batchSize
+    
+    loop For each batch
+        Service -> Service: Serialize batch to JSON\n[{CustId, LastTicketDate}, ...]
+        
+        Service -> DataAccess: UpdateLastTransDate(jsonString)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create UpdateAssociationCustomerLastTransCriteria\nCustInfos = jsonString
+        DataAccess -> ArchiveDB: EXEC CTS_Arc_CustomerAssociation_LastTicketDate_Update\n@ip_CustInfo (JSON)
+        activate ArchiveDB
+        note right of ArchiveDB
+            Stored Procedure:
+            - Parse JSON array
+            - Update CustomerAssociation table
+            - Set LastTicketDate
+            - Track betting history
+        end note
+        ArchiveDB --> DataAccess: Success
+        deactivate ArchiveDB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service -> Service: Thread.Sleep(10ms)
+        note right
+            Throttling to prevent
+            database overload
+        end note
+    end
+else No Member Customers
+    note right of Service
+        Skip Member update
+    end note
+end
+
+Service --> JobService: IRealtimeCheckChangeClassificationService
+deactivate Service
+
+' Step 3: Update Agency LastTransDate
+JobService -> Service: UpdateLastTransDate(CustInfosAgency, batchSize)
+activate Service
+
+alt Has Agency Customers
+    Service -> Service: Chunk CustInfosAgency by batchSize
+    
+    loop For each batch
+        Service -> Service: Serialize batch to JSON
+        
+        Service -> DataAccess: UpdateLastTransDate(jsonString)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Create UpdateAssociationCustomerLastTransCriteria
+        DataAccess -> ArchiveDB: EXEC CTS_Arc_CustomerAssociation_LastTicketDate_Update\n@ip_CustInfo (JSON)
+        activate ArchiveDB
+        ArchiveDB --> DataAccess: Success
+        deactivate ArchiveDB
+        
+        DataAccess --> Service: void
+        deactivate DataAccess
+        
+        Service -> Service: Thread.Sleep(10ms)
+    end
+else No Agency Customers
+    note right of Service
+        Skip Agency update
+    end note
+end
+
+Service --> JobService: IRealtimeCheckChangeClassificationService
+deactivate Service
+
+' Step 4: Update Next Scan Times
+JobService -> Service: UpdateNextScanCheckChange(realtimeChanges)
+activate Service
+
+Service -> DataAccess: UpdateNextScanCheckChange(nextScanned)
+activate DataAccess
+
+DataAccess -> DataAccess: Create RealtimeCheckChangeUpdateNextScanCriteria\nNextScannedDateTime1-4
+DataAccess -> VR2DB: EXEC CTS_NormalClassification_RealTime_UpdateNextScannedTime\n@NextScannedDateTime1-4
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Save 4 next scan time slots
+    - Optimization for:
+      * Sliding window
+      * Parallel processing
+      * Load balancing
+end note
+VR2DB --> DataAccess: Success
+deactivate VR2DB
+
+DataAccess --> Service: void
+deactivate DataAccess
+
+Service --> JobService: IRealtimeCheckChangeClassificationService
+deactivate Service
+
+JobService --> Controller: Task<bool> (true)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true }
+deactivate Controller
+
+@enduml
+

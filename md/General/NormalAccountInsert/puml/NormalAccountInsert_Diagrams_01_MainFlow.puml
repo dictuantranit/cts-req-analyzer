@@ -1,0 +1,152 @@
+@startuml NormalAccountInsert_MainFlow
+!theme plain
+title Normal Account Insert - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationJobs/normalAccountInsert
+    Parameters:
+    - batchExternalSize (int)
+    - batchInternalSize (int, default: 5000)
+    - isLogData (bool)
+end note
+
+:NormalAccountJobService.Execute(batchExternalSize, batchInternalSize, isLogData);
+
+if (batchInternalSize <= 0) then (yes)
+  :Set batchInternalSize = 5000;
+else (no)
+  :Use provided batchInternalSize;
+endif
+
+repeat
+  :GetNormalAccounts(isLogData);
+    :Call CTS_GeneralNormalClassification_NormalAccount_Get [SP];
+    note right
+        Database: bodb_VR2Model (SQL Server)
+        
+        Parameters:
+        - @ScannedMaxId (OUTPUT)
+        - @IsLogData (INPUT)
+        
+        Returns: Classified customers
+        - CustId, CategoryId, CategoryGroupId
+        - TurnoverRM, WinlossRM, BetCount
+        - ScanTaggingType, ScanTaggingTWType
+        - ScanSpecialLicSubType
+    end note
+
+  if (Has Customers?) then (yes)
+    :Initialize failedThreads (ConcurrentBag);
+    :Chunk customers by batchInternalSize;
+    
+    partition "Parallel Processing (5 Threads)" {
+      :Process in parallel with 5 threads;
+      note right
+          AsParallel()
+          .WithDegreeOfParallelism(5)
+          .ForAll(custBatch => ...)
+      end note
+      
+      repeat :For each batch (parallel)
+        partition "Step 1: Apply Tagging" {
+          :MergeWithTaggedNormalTaggingFlow(custs);
+          
+          :Step 1.1: ProcessTWTaggedCust;
+          note right
+              If ScanTaggingTWType = 1:
+              - Check TW Group Betting & Reject
+              - Apply exclusion rules
+              - Set TaggingID + TW metrics
+          end note
+          
+          :Step 1.2: ProcessAssWithPACust;
+          note right
+              If TaggingID still = 0:
+              - Check Association with PA
+              - Set TaggingID + TaggingType
+          end note
+          
+          :Step 1.3: ProcessTWTaggedSpecialLicSubCust;
+          note right
+              If TaggingID still = 0:
+              - Check Special LicSub TW Tagging
+              - Set TaggingID + TaggingType
+          end note
+        }
+        
+        :InsertNormalAccount(finalNormalAcc);
+          :Serialize to JSON;
+          :Call BaseCustomerClassification.InsertCustomerClassification;
+          note right
+              CCInputFlow = Normal
+              FromAction = CTSServices
+              
+              Insert classification + tagging to DB
+          end note
+        
+        if (Insert Successful?) then (yes)
+          partition "Parallel Tasks (4 concurrent)" {
+            fork
+              :Task 1: PushCCToExternal;
+              note right
+                  Push to MainDB (External)
+                  - ExternalBatchSize
+                  - Update MainDB classification
+              end note
+            fork again
+              :Task 2: CompleteSpecialLicSubClassification;
+              note right
+                  Complete Special LicSub
+                  - For ScanSpecialLicSubType = 1
+                  - Update TW classification
+              end note
+            fork again
+              :Task 3: PreprocessDangerousAssociation;
+              note right
+                  Preprocess Dangerous Association
+                  - For customers needing scan
+                  - Queue for association check
+              end note
+            fork again
+              :Task 4: DeleteAFCAccounts;
+              note right
+                  Delete from Anti-Fraud Center
+                  - Remove from AFC monitoring
+                  - Sync AFC data
+              end note
+            end fork
+          }
+          
+          if (All tasks successful?) then (no)
+            :Add failure to failedThreads;
+          endif
+        endif
+      repeat while (More batches in parallel?)
+    }
+    
+    :CompleteNormalAccountInsert(scannedMaxId, failedThreads.IsEmpty);
+    if (All threads successful?) then (yes)
+      :Call CTS_GeneralNormalClassification_NormalAccount_Complete [SP];
+      note right
+          Mark as processed:
+          UPDATE IsProcessed = 1
+          WHERE ID <= @ScannedMaxId
+      end note
+    else (no)
+      :Skip completion (will retry);
+      note right
+          Failed batches remain
+          for next execution
+      end note
+    endif
+  endif
+
+repeat while (IsContinute = true?)
+
+:Return Success;
+stop
+
+@enduml
+

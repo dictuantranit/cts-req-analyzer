@@ -1,0 +1,175 @@
+@startuml NormalAccountClassification_DatabaseFlow
+!theme plain
+title Normal Account Classification - Database Flow
+
+start
+
+partition "Step 1: Get Normal Pool Customers" {
+  :Call SP: CTS_GeneralNormalClassification_NormalPool_Get;
+  note right
+      **Database**: bodb_VR2Model (SQL Server)
+      **Timeout**: 300 seconds
+      
+      **Output Parameters**:
+      - @ScannedMaxId (BIGINT, OUTPUT)
+  end note
+  
+  :Return ResultSet + ScannedMaxId;
+  note right
+      **ResultSet**:
+      - CustId (BIGINT)
+      - IsRealtimeOnly (BIT)
+      - ScanTaggingType (INT)
+      - ScanSpecialLicSubType (INT)
+      
+      **Ordering**: Priority DESC, ID ASC
+      **Filter**: IsProcessed = 0
+  end note
+}
+
+partition "Step 2: Get Current Customer Categories (Batched)" {
+  if (Has Customers?) then (yes)
+    :Chunk customers into batches (batchInternalSize);
+    
+    repeat :For each batch
+      :Extract CustID + ScanSpecialLicSubType;
+      :Serialize to JSON;
+      note right
+          JSON Format:
+          [
+            {"CustID": 123, "ScanSpecialLicSubType": 0},
+            {"CustID": 456, "ScanSpecialLicSubType": 1},
+            ...
+          ]
+      end note
+      
+      :Call SP: CTS_DC_CustClassification_Normal_GetCurrentCategory;
+      note right
+          **Database**: CTS_DataCenter (MySQL)
+          **Timeout**: 300 seconds
+          
+          **Parameters**:
+          - @ip_CustInfo (JSON)
+      end note
+      
+      :Return ResultSet;
+      note right
+          **ResultSet**:
+          - CustID (BIGINT)
+          - CategoryID (INT)
+          - IsNewCreated (TINYINT/BOOL)
+          - IsProbationLastDay (TINYINT/BOOL)
+          - IsSpecialLicSubCC (TINYINT/BOOL)
+      end note
+      
+      :Collect to customerCategories collection;
+    repeat while (More batches?)
+  else (no)
+    :Skip;
+  endif
+}
+
+partition "Step 3: Join Data in Application Layer" {
+  :LINQ Join;
+  note right
+      normalPoolCustomers
+      .Join(customerCategories,
+        custMain => custMain.CustId,
+        custCTS => custCTS.CustID,
+        (custMain, custCTS) => new {
+          CustId, CategoryId,
+          IsNewCreated, IsProbationLastDay,
+          IsRealtimeOnly, ScanTaggingType,
+          ScanSpecialLicSubType, IsSpecialLicSubCC
+        })
+      
+      **Purpose**: Combine Pool data + Category data
+  end note
+  
+  :Create GetCurrentCustomerCategoryModel[];
+}
+
+partition "Step 4: Parallel Classification (4 Threads)" {
+  :Chunk joined data by batchInternalSize;
+  
+  split
+    :Thread 1: Process batch;
+    
+    :Serialize batch to XML;
+    note right
+        Using ToXmlString() extension
+        
+        XML Format:
+        <ArrayOfr>
+          <r>
+            <CustId>123</CustId>
+            <CategoryId>5</CategoryId>
+            <IsNewCreated>false</IsNewCreated>
+            <IsProbationLastDay>false</IsProbationLastDay>
+            <IsRealtimeOnly>true</IsRealtimeOnly>
+            <ScanTaggingType>0</ScanTaggingType>
+            <ScanSpecialLicSubType>0</ScanSpecialLicSubType>
+            <IsSpecialLicSubCC>false</IsSpecialLicSubCC>
+          </r>
+          ...
+        </ArrayOfr>
+    end note
+    
+    :Call SP: CTS_GeneralNormalClassification_NormalPool_Classify;
+    note right
+        **Database**: bodb_VR2Model (SQL Server)
+        **Timeout**: 300 seconds
+        
+        **Parameters**:
+        - @CustomersXML (XML/NVARCHAR)
+        
+        **Logic**:
+        - Parse XML customer list
+        - Apply classification rules
+        - Insert/Update CustomerClassification
+    end note
+    
+    :Join CustIds to comma-separated string;
+    
+    :Call SP: CTS_GeneralNormalClassification_NormalPool_Clear;
+    note right
+        **Database**: bodb_VR2Model (SQL Server)
+        **Timeout**: 300 seconds
+        
+        **Parameters**:
+        - @ListCustId (VARCHAR): "123,456,..."
+        - @ScannedMaxId (BIGINT)
+        
+        **Logic**:
+        - DELETE FROM Normal Pool
+        - WHERE CustId IN (parsed list)
+        - OR ID <= @ScannedMaxId
+    end note
+  split again
+    :Thread 2: Process batch;
+    note right: Same flow as Thread 1
+  split again
+    :Thread 3: Process batch;
+    note right: Same flow as Thread 1
+  split again
+    :Thread 4: Process batch;
+    note right: Same flow as Thread 1
+  end split
+}
+
+:Complete;
+
+note right
+  **Key Points**:
+  1. **2 Databases**: VR2 (SQL Server) + DataCenter (MySQL)
+  2. **Batch Processing**: Get Categories in batches
+  3. **Application Join**: LINQ Join in C# layer
+  4. **Parallel Processing**: 4 threads for classification
+  5. **3 Data Formats**: ResultSet → JSON → XML
+  6. **Dual Cleanup**: By CustId list AND ScannedMaxId
+end note
+
+stop
+
+@enduml
+

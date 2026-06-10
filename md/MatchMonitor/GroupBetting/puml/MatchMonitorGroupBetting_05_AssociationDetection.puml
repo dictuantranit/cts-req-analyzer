@@ -1,0 +1,341 @@
+@startuml MatchMonitorGroupBetting_AssociationDetection
+!theme plain
+title Match Monitor Group Betting - Association Detection Logic
+
+start
+
+:Configuration: MatchDetectAssociationSettingModel;
+
+note left
+    **Class Properties:**
+    + HashSet<int> DeviceSports
+    + HashSet<int> AISports
+    + HashSet<int> IPSports
+    + HashSet<int> _3MatchesLast7DaysSports
+    + HashSet<int> IPLast3DaysSports
+    
+    **Example Configuration:**
+    From API Parameters:
+    - sportsDevice = "1,2,3,4,5"
+    - sportsAI = "1,2,3,4,5"
+    - sportsIP = "1,2,3,4,5"
+    - sports3MatchesLast7Days = "1,2,3,4,5"
+    - sportsIPLast3Days = "1,2,3,4,5"
+    
+    Parsed to HashSets:
+    - DeviceSports = {1, 2, 3, 4, 5}
+    - AISports = {1, 2, 3, 4, 5}
+    - IPSports = {1, 2, 3, 4, 5}
+    
+    Sport IDs: 1=Soccer, 2=Basketball, 3=Tennis, etc.
+end note
+
+:Input: Customer Lists + SportType;
+
+note right
+    **Input Parameters:**
+    - ctsCustIDList: "5001,5002,5003,5004,5005"
+    - custIDList: "user1,user2,user3,user4,user5"
+    - licCustIDList: "lic1,lic2,lic3"
+    - sportType: 1 (Soccer)
+end note
+
+:Check Sport Configuration;
+
+note right
+    SportType = 1 (Soccer)
+        
+        Check if Soccer uses each detection method:
+        - IsDevice = DeviceSports.Contains(1)
+        - IsAI = AISports.Contains(1)
+        - IsIP = IPSports.Contains(1)
+        - Is3MatchesLast7Days = _3MatchesLast7DaysSports.Contains(1)
+        - IsIPLast3Days = IPLast3DaysSports.Contains(1)
+end note
+
+:Create DetectAssociationParamModel;
+
+note right
+    **C# Code:**
+    
+    private IEnumerable<DetectAssociationMergeGroupLv1Entity> 
+    DetectAssociation(
+        string ctsCustIDList, 
+        string custIDList, 
+        string licCustIDList, 
+        int sportType)
+    {
+        var param = new DetectAssociationParamModel
+        {
+            CTSCustIds = ctsCustIDList,
+            CustIds = custIDList,
+            IsDevice = AssDetectSetting.DeviceSports.Contains(sportType),
+            IsAI = AssDetectSetting.AISports.Contains(sportType),
+            IsIP = AssDetectSetting.IPSports.Contains(sportType),
+            Is3MatchesLast7Days = 
+                AssDetectSetting._3MatchesLast7DaysSports.Contains(sportType),
+            IsIPLast3Days = 
+                AssDetectSetting.IPLast3DaysSports.Contains(sportType),
+            CustIdsIPLast3Days = licCustIDList
+        };
+        
+        return _associationDetection.DetectAssociationLv1(param);
+    }
+end note
+
+:Call AssociationDetectionService.DetectAssociationLv1();
+
+:Database/Service Execution;
+note right
+    SP: CTS_AssociationDetection_Lv1
+    
+    Input:
+    - @CTSCustIds = "5001,5002,5003,5004,5005"
+    - @CustIds = "user1,user2,user3,user4,user5"
+    - @IsDevice = 1
+    - @IsAI = 1
+    - @IsIP = 1
+    - @Is3MatchesLast7Days = 1
+    - @IsIPLast3Days = 1
+    - @CustIdsIPLast3Days = "lic1,lic2,lic3"
+end note
+
+partition "Detection Logic (5 Criteria)" {
+    :Parse Customer IDs;
+    
+    if (IsDevice?) then (yes)
+        :1. Device Detection;
+        note right
+            **Criteria:** Same DeviceID
+            
+            **Query:**
+            SELECT CustID, DeviceID
+            FROM CTSCustomer
+            WHERE CustID IN (@CustIds)
+            GROUP BY DeviceID
+            HAVING COUNT(*) > 1
+            
+            **Example:**
+            User1: DeviceID = "ABC123"
+            User2: DeviceID = "ABC123"
+            → Group them together
+            
+            **Use Case:**
+            - Same phone/computer
+            - Shared device
+            - Internet cafe
+        end note
+    endif
+    
+    if (IsAI?) then (yes)
+        :2. AI Detection;
+        note right
+            **Criteria:** ML pattern matching
+            
+            **Process:**
+            - Analyze betting patterns
+            - Calculate similarity scores
+            - Group similar customers
+            
+            **Example:**
+            - Similar betting timing
+            - Similar bet amounts
+            - Similar selection patterns
+            
+            **Use Case:**
+            - Sophisticated fraud
+            - Pattern-based detection
+        end note
+    endif
+    
+    if (IsIP?) then (yes)
+        :3. IP Detection;
+        note right
+            **Criteria:** Same IP address
+            
+            **Query:**
+            SELECT CustID, IPAddress
+            FROM TicketTrans
+            WHERE CustID IN (@CustIds)
+                AND BetTime >= NOW() - INTERVAL 1 DAY
+            GROUP BY IPAddress
+            HAVING COUNT(DISTINCT CustID) > 1
+            
+            **Example:**
+            User1: IP = "192.168.1.100"
+            User2: IP = "192.168.1.100"
+            → Group them together
+        end note
+    endif
+    
+    if (Is3MatchesLast7Days?) then (yes)
+        :4. Co-betting (3+ matches in 7 days);
+        note right
+            **Criteria:** Bet together on 3+ matches
+            
+            **Query:**
+            SELECT CustID1, CustID2, COUNT(*) as Cnt
+            FROM (
+                SELECT DISTINCT MatchID, CustID
+                FROM TicketTrans
+                WHERE CustID IN (@CustIds)
+                    AND BetTime >= NOW() - INTERVAL 7 DAY
+            ) t1
+            JOIN t2 ON t1.MatchID = t2.MatchID
+            GROUP BY CustID1, CustID2
+            HAVING COUNT(*) >= 3
+            
+            **Example:**
+            User1 & User2 both bet on:
+            Match A, Match B, Match C
+            → Group them together
+        end note
+    endif
+    
+    if (IsIPLast3Days?) then (yes)
+        :5. IP Last 3 Days (License Customers);
+        note right
+            **Criteria:** Same IP in last 3 days
+            
+            **Query:**
+            SELECT CustID, IPAddress
+            FROM TicketTrans
+            WHERE CustID IN (@CustIdsIPLast3Days)
+                AND BetTime >= NOW() - INTERVAL 3 DAY
+            GROUP BY IPAddress
+            HAVING COUNT(DISTINCT CustID) > 1
+            
+            **Use Case:**
+            - Licensed/VIP customers
+            - Recent activity focus
+            - Tighter time window
+        end note
+    endif
+    
+    :Merge All Detection Results;
+    note right
+        **Merge Logic:**
+        Combine results from all methods:
+        - Union of all detected groups
+        - Merge overlapping groups
+        - Assign final GroupID
+        
+        **Example Merge:**
+        Device Detection: {user1, user2} → Group 1
+        IP Detection: {user2, user3} → Group 2
+        Merged: {user1, user2, user3} → Group 1
+        
+        **Merge Algorithm:**
+        - If any overlap → Same group
+        - Transitive grouping
+    end note
+    
+    :Assign Association Type;
+    note right
+        For each customer, record which method(s)
+        detected the association:
+        - "Device"
+        - "AI"
+        - "IP"
+        - "3Matches"
+        - "IPLast3Days"
+        - "Device,IP" (multiple)
+    end note
+}
+
+:Return Detection Results;
+
+note right
+    IEnumerable<DetectAssociationMergeGroupLv1Entity>
+    
+    Example Output:
+    [
+        {
+            CustID: "user1",
+            CTSCustID: 5001,
+            GroupID: 1,
+            AssociationType: "Device",
+            DeviceID: "ABC123",
+            Confidence: 0.95
+        },
+        {
+            CustID: "user2",
+            CTSCustID: 5002,
+            GroupID: 1,
+            AssociationType: "Device,IP",
+            DeviceID: "ABC123",
+            IPAddress: "192.168.1.100",
+            Confidence: 0.98
+        },
+        {
+            CustID: "user3",
+            CTSCustID: 5003,
+            GroupID: 1,
+            AssociationType: "IP",
+            IPAddress: "192.168.1.100",
+            Confidence: 0.90
+        }
+    ]
+    
+    Note: Only customers with GroupID returned
+    (Customers without associations are filtered out)
+end note
+
+:Filter: Where GroupID.HasValue;
+
+note right
+    In code:
+    assDetectionHasGroupID = 
+        DetectAssociation(...)?
+            .Where(n => n.GroupID.HasValue);
+    
+    Only customers in groups are considered fraud
+    Individual bettors (no association) are skipped
+end note
+
+stop
+
+floating note right
+    ===============================================================
+    ASSOCIATION DETECTION SUMMARY
+    ===============================================================
+    
+    **Purpose:**
+    Identify groups of customers betting together (fraud detection)
+    
+    **Methods (5 criteria):**
+    1. ✓ Device Detection - Same device ID
+    2. ✓ AI Detection - ML pattern matching
+    3. ✓ IP Detection - Same IP address
+    4. ✓ 3 Matches Last 7 Days - Frequent co-betting
+    5. ✓ IP Last 3 Days - Recent IP matching
+    
+    **Sport-Specific:**
+    Each sport can enable/disable criteria independently
+    Example: Soccer uses all 5, Basketball only Device+IP
+    
+    **Flexible Configuration:**
+    - API parameters control which sports use which criteria
+    - Easy to adjust per sport without code changes
+    - Can add new criteria without breaking existing
+    
+    **Performance:**
+    - Single SP call for all detections
+    - Efficient grouping algorithm
+    - Results cached for reuse
+    
+    **Output:**
+    - GroupID: Unique group identifier
+    - AssociationType: Which method(s) detected
+    - Confidence: Detection confidence score (if applicable)
+    
+    **Integration:**
+    Used by:
+    - Group Betting Rule (Match Monitor)
+    - Association Detection Reports
+    - Customer Classification
+    - Fraud Investigation Tools
+end note
+
+@enduml
+

@@ -1,0 +1,270 @@
+@startuml DailyRobotClassification_SP_TWRobotList
+title CTS_Customer_RobotListSel - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #FF6F00
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_Customer_RobotListSel
+  **Database**: ON_USER.wsv_cts (SQL Server)
+  **Timeout**: **900 seconds (15 minutes)** ⭐
+  **Called From**: RobotUserGetCriteria
+  
+  **Long Timeout Reason**:
+  - Complex TW system queries
+  - Multiple table joins
+  - Large dataset possible
+  - Taiwan regional data
+end note
+
+partition "Input Parameters" {
+  :Receive Timespan Parameter;
+  note right
+    **Input**: Last Scanned Timestamp (long)
+    - Time-based pagination
+    - Get robots since last scan
+    - Format: Unix timestamp or similar
+  end note
+}
+
+partition "Get Pagination State" {
+  :Read lastScannedTimespan;
+  note right
+    **Timespan-Based Pagination**:
+    - Not ID-based (unlike AI Robot)
+    - Time window filtering
+    - WHERE Timestamp > @lastScannedTimespan
+    
+    **Initial State** (first run):
+    - @lastScannedTimespan = 0 or earliest date
+    - Get all recent robots
+    
+    **Subsequent Runs**:
+    - Start from last max timestamp
+    - Incremental time-based scanning
+  end note
+}
+
+partition "Query TW Robot Detection Data" {
+  :Build complex TW query;
+  note right
+    **TW System Query** (Complex):
+    
+    This is a **complex multi-table query** specific to TW system.
+    The actual implementation may involve:
+    
+    ```sql
+    -- Example structure (actual query may differ)
+    SELECT 
+      c.CustId,
+      COUNT(*) AS Counter,
+      MAX(r.Timestamp) AS Timestamp,
+      r.DetectionReason,
+      r.DetectionScore
+    FROM TW_CustomerRobotDetection r
+    JOIN TW_Customer c ON r.CustomerId = c.CustomerId
+    JOIN TW_BettingPatterns bp ON c.CustId = bp.CustId
+    WHERE r.Timestamp > @lastScannedTimespan
+      AND r.IsConfirmed = 1
+      AND r.DetectionType IN ('Rule-Based', 'Manual')
+    GROUP BY c.CustId
+    HAVING COUNT(*) >= @minDetectionCount
+    ORDER BY MAX(r.Timestamp)
+    ```
+    
+    **Query Characteristics**:
+    - **Multiple Joins**: Customer, Detection, Patterns
+    - **Filtering**: Time-based + Confirmation status
+    - **Grouping**: By CustId (aggregate detections)
+    - **Having Clause**: Minimum detection threshold
+    - **Complex Logic**: Taiwan-specific rules
+  end note
+
+  :Execute TW system query;
+  note right
+    **TW Detection Criteria**:
+    
+    1. **Rule-Based Detection**:
+       - Taiwan-specific betting rules
+       - Regional pattern matching
+       - Historical behavior analysis
+       - Compliance with TW regulations
+    
+    2. **Manual Review**:
+       - Human-verified robot accounts
+       - Customer service reports
+       - Fraud team investigation
+       - Manual flagging by TW staff
+    
+    3. **Behavioral Patterns**:
+       - Taiwan market specific behaviors
+       - Language/location anomalies
+       - Payment method patterns
+       - Device/IP analysis
+    
+    4. **Historical Data**:
+       - Previous robot classifications
+       - Account history review
+       - Transaction patterns over time
+       - Relationship to known robots
+    
+    **Detection Score**:
+    - Manual: 100 (human confirmed)
+    - Rule-based: 70-90 (rule confidence)
+    - Combined: Weighted average
+  end note
+}
+
+partition "Build Result Set" {
+  :Calculate MaxTimestamp;
+  note right
+    **MaxTimestamp Calculation**:
+    ```sql
+    MAX(Timestamp) AS MaxTimestamp
+    ```
+    
+    **Purpose**:
+    - For next iteration pagination
+    - WHERE Timestamp > MaxTimestamp
+    - Time-based incremental scanning
+  end note
+
+  :Build TWRobotUserViewEntity;
+  note right
+    **Result Structure**:
+    
+    **TWRobotUserViewEntity**:
+    - RobotUsers: List<TWRobotUserEntity>
+    - MaxTimestamp: long (for pagination)
+    
+    **TWRobotUserEntity** (per robot):
+    - CustId: long (Customer ID)
+    - Counter: int (Detection count)
+    - RoleID: int (filled later by GetCustomerRole)
+    - Timestamp: long (Detection timestamp)
+    
+    **Counter Meaning**:
+    - Number of times detected as robot
+    - Higher = more confident
+    - Used for scoring/prioritization
+  end note
+}
+
+:Return TWRobotUserViewEntity;
+note right
+  **Return Type**: TWRobotUserViewEntity
+  
+  **Components**:
+  1. **RobotUsers[]**: List of detected robots
+  2. **MaxTimestamp**: Last timestamp for pagination
+  
+  **Empty Result Indicates**:
+  - No new TW robots detected
+  - All processed up to current time
+  - Job can complete
+  
+  **Non-Empty Result**:
+  - Process these TW robots
+  - Separate Agency vs Member
+  - Update MaxTimestamp after processing
+end note
+
+:Log Execution;
+note right
+  **Logging**:
+  - Robot count returned
+  - Timespan range (from-to)
+  - MaxTimestamp value
+  - Query execution time (can be long!)
+  - Any errors/warnings
+  - Performance metrics
+end note
+
+note right
+  **Pagination Logic Summary**:
+  
+  **First Iteration**:
+  - @lastScannedTimespan = 0 (or earliest)
+  - Get robots from beginning of time window
+  - Return MaxTimestamp = latest in result set
+  - Next run starts from this MaxTimestamp
+  
+  **Subsequent Iterations**:
+  - @lastScannedTimespan = previous MaxTimestamp
+  - Get robots WHERE Timestamp > @lastScannedTimespan
+  - Return new MaxTimestamp
+  - Continue until no more robots
+  
+  **Time Window Considerations**:
+  - Typical window: Last 7-30 days
+  - Not infinite historical data
+  - Focus on recent detections
+  - Prevents overwhelming system
+  
+  **Advantages of Time-Based Pagination**:
+  1. **Natural Ordering**: By detection time
+  2. **Flexible**: Can adjust time windows
+  3. **Resumable**: Can resume from timestamp
+  4. **No ID Dependency**: Works with any data model
+  
+  **Disadvantages**:
+  1. **Complex Queries**: Multiple joins and filters
+  2. **Long Timeout**: 900 seconds needed
+  3. **Duplicate Risk**: Same timestamp possible
+  4. **Performance**: Slower than ID-based
+  
+  **TW System Integration**:
+  - This SP is **consumer** of TW detection data
+  - TW system is **producer** (Taiwan-based detection)
+  - Regional focus (Taiwan market)
+  - Manual + automated detection blend
+  - Historical data integration
+  
+  **Performance Considerations**:
+  - **Long Timeout**: 900 seconds (15 minutes)
+  - **Complex Query**: Multiple joins, grouping
+  - **Large Dataset**: Taiwan customer base
+  - **Optimization**: 
+    * Indexes on Timestamp, CustId
+    * Query plan optimization
+    * Materialized views (if available)
+    * Batch size limits
+  
+  **Business Logic**:
+  - **Taiwan-Specific**: Regional patterns and rules
+  - **Manual Review**: Human verification included
+  - **Rule-Based**: Automated TW detection rules
+  - **Compliance**: Taiwan regulatory requirements
+  - **Historical**: Long-term pattern analysis
+  
+  **Comparison with AI Robot**:
+  | Aspect | AI Robot | TW Robot |
+  |--------|----------|----------|
+  | **Database** | MySQL | SQL Server |
+  | **Pagination** | ID-based | Time-based |
+  | **Timeout** | 300s | **900s (15 min)** |
+  | **Query** | Simple | Complex (joins) |
+  | **Detection** | Automated AI | Rule + Manual |
+  | **Performance** | Fast | Slower |
+  | **Complexity** | Low | High |
+  | **Regional** | Global | Taiwan focus |
+  
+  **TW Detection Sources**:
+  1. **TW Fraud Team**: Manual flagging
+  2. **TW Rule Engine**: Automated rules
+  3. **TW Customer Service**: Reports
+  4. **TW Compliance**: Regulatory checks
+  5. **Historical Analysis**: Past behavior
+end note
+
+stop
+
+@enduml
+

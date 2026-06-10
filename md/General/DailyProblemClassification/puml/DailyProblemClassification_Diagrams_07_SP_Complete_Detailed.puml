@@ -1,0 +1,276 @@
+@startuml DailyProblemClassification_SP_Complete
+title CTS_DC_CustClassification_DailyScanPA_Complete - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #F3E5F5
+skinparam activityBorderColor #7B1FA2
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_CustClassification_DailyScanPA_Complete
+  **Database**: CTS_DataCenter.ctsServiceAdmin (MySQL)
+  **Timeout**: 300 seconds (default)
+  **Parameters**: @CustIDs (comma-separated string)
+  **Called From**: PADailyScanCompleteCriteria
+end note
+
+:Receive CustIDs Parameter;
+note right
+  **Input Parameter**: @CustIDs (string)
+  
+  **Format**: Comma-separated list
+  **Example**: "123456,789012,345678,901234"
+  
+  **Source**: 
+  - Processed customers from current batch
+  - Extracted from PADailyScanFromQueueModel
+  - JOIN with comma delimiter
+  
+  **Usage**:
+  - Mark these customers as processed
+  - Remove from queue
+  - Prevent re-processing
+end note
+
+if (CustIDs is NULL or empty?) then (yes)
+  :Log Warning;
+  note right
+    **Warning**: No CustIDs provided
+    - Possible empty queue
+    - Or processing error
+    - Skip deletion
+  end note
+  :Return without action;
+  stop
+else (no)
+endif
+
+:Parse CustID string to list;
+note right
+  **String Parsing**:
+  - Split by comma delimiter
+  - Trim whitespace
+  - Convert to numeric list
+  - Validate format
+  
+  **MySQL Method**:
+  - FIND_IN_SET() function
+  - Or temp table with split
+  - Or JSON_TABLE if formatted as JSON
+  
+  **Result**: Array of CustIDs
+end note
+
+:Create temp table #CustIDsToDelete;
+note right
+  **Temp Table**:
+  - CustID (long)
+  - One row per customer
+  - Used for JOIN with queue table
+  
+  **Purpose**:
+  - Efficient batch deletion
+  - Avoid string parsing in WHERE clause
+  - Better query performance
+end note
+
+:Validate CustIDs exist in queue;
+note right
+  **Validation Query**:
+  SELECT COUNT(*) 
+  FROM CTSCustomerClassification_DailyPAQueue q
+  INNER JOIN #CustIDsToDelete t ON q.CustID = t.CustID
+  
+  **Purpose**:
+  - Ensure customers are in queue
+  - Detect orphaned CustIDs
+  - Log discrepancies
+end note
+
+:BEGIN TRANSACTION;
+note right
+  **Transaction Management**:
+  - Ensure atomicity
+  - All-or-nothing deletion
+  - Rollback on error
+  - Maintain data consistency
+end note
+
+partition "Delete from Queue" {
+  :Execute DELETE statement;
+  note right
+    **DELETE Query**:
+    DELETE FROM CTSCustomerClassification_DailyPAQueue
+    WHERE CustID IN (SELECT CustID FROM #CustIDsToDelete)
+    
+    **Effect**:
+    - Remove processed customers from queue
+    - Free up queue space
+    - Enable next batch processing
+    
+    **Indexed on CustID** for performance
+  end note
+
+  :Get affected rows count;
+  note right
+    **Row Count**:
+    - Number of customers deleted
+    - Should match input CustID count
+    - Discrepancy indicates issue
+  end note
+}
+
+if (Deletion successful?) then (yes)
+  :COMMIT TRANSACTION;
+  note right
+    **Commit Success**:
+    - Changes persisted
+    - Queue cleaned
+    - Ready for next batch
+  end note
+  
+  :Log Success;
+  note right
+    **Success Logging**:
+    - Customer count deleted
+    - Execution time
+    - Queue size remaining
+  end note
+else (no)
+  :ROLLBACK TRANSACTION;
+  note right
+    **Rollback**:
+    - Undo all changes
+    - Queue unchanged
+    - Customers remain for retry
+  end note
+  
+  :Log Error;
+  note right
+    **Error Logging**:
+    - Error message
+    - CustIDs that failed
+    - Stack trace
+    - Alert for investigation
+  end note
+  
+  :Throw Exception;
+  stop
+endif
+
+:Check remaining queue size;
+note right
+  **Queue Size Check**:
+  SELECT COUNT(*) 
+  FROM CTSCustomerClassification_DailyPAQueue
+  
+  **Purpose**:
+  - Determine if more customers to process
+  - Return isContinue flag
+  - Drive recursive processing
+  
+  **Logic**:
+  - Count > 0 → isContinue = true
+  - Count = 0 → isContinue = false
+end note
+
+if (More customers in queue?) then (yes)
+  :Return isContinue = true;
+  note right
+    **More to Process**:
+    - Queue not empty
+    - Recursive call triggered
+    - Next batch will be fetched
+    - JobRun() called again
+  end note
+else (no)
+  :Return isContinue = false;
+  note right
+    **Queue Empty**:
+    - All customers processed
+    - Job completion
+    - No recursive call
+    - Wait for next job trigger
+  end note
+endif
+
+:Update statistics;
+note right
+  **Statistics Update**:
+  - Total processed today
+  - Average processing time
+  - Queue throughput
+  - Performance metrics
+end note
+
+:Cleanup temp table;
+note right
+  **Cleanup**:
+  - DROP temp table #CustIDsToDelete
+  - Release resources
+  - Memory cleanup
+end note
+
+stop
+
+note bottom
+  **Queue Management**:
+  
+  **Purpose**: Mark PA customers as processed and remove from queue
+  **Effect**: Enables FIFO processing for next batch
+  **Transaction**: Ensures data consistency
+  
+  **Queue Lifecycle**:
+  1. **Insert**: RealtimeClassification adds PA customers
+  2. **Fetch**: GetFromQueue retrieves oldest customers (FIFO)
+  3. **Process**: DailyProblemClassification processes batch
+  4. **Complete**: This SP deletes processed customers
+  5. **Repeat**: Until queue empty
+  
+  **Error Handling**:
+  - Failed processing: Customers remain in queue
+  - Automatic retry on next job run
+  - Transaction rollback on error
+  - Alert if queue grows too large
+  
+  **Performance Optimization**:
+  - Batch deletion (not one-by-one)
+  - Indexed deletion (CustID index)
+  - Transaction batching
+  - Temp table for efficiency
+  
+  **Monitoring**:
+  - Queue size tracking
+  - Processing rate monitoring
+  - Average processing time
+  - Alert thresholds:
+    * Queue size > 100,000
+    * Processing time > 1 hour
+    * Error rate > 5%
+  
+  **Recursive Processing Logic**:
+  ```
+  do {
+    customers = GetFromQueue()
+    if (customers.Any()) {
+      Process(customers)
+      UpdateComplete(customers)
+    }
+    isContinue = (queue.Count > 0)
+  } while (isContinue)
+  ```
+  
+  **Table Cleanup**:
+  - Regular deletion prevents table growth
+  - Maintains FIFO performance
+  - Prevents index fragmentation
+  - Optimizes query execution
+end note
+
+@enduml
+

@@ -1,0 +1,59 @@
+@startuml DangerMonitor_MainFlow
+!theme plain
+title Danger Monitor - Main Business Flow
+
+start
+:User Opens Danger Monitor Page;
+:Load Initial Data;
+  :GetSportBettype();
+  :GetLeagueGroup();
+  :Load Filters;
+:User Sets Search Criteria;
+  :Select Danger Levels;
+  :Select Sport/Bettype;
+  :Enter Date Range;
+  if (Enter Username?) then (yes)
+    :ValidateUsername();
+    :Validate Username;
+  else (no)
+  endif
+  if (Enable Association Mode?) then (yes)
+    :Set IsRootUserAssociationMode = true;
+  else (no)
+    :Set IsRootUserAssociationMode = false;
+  endif
+:Execute Search;
+if (Association Mode?) then (yes)
+  :DetectAssociationCustByUserRoot();
+  :GetDangerMonitorWithAssociationByRootUser();
+  :Call CTS_MatchTicketInfo_Associations_Get [SP];
+else (no)
+  :GetDangerMonitorWithNoAssociation();
+  :Call CTS_MatchTicketInfo_Get [SP];
+endif
+:Display Results in Grid;
+if (User Clicks Match?) then (yes)
+  :Load Detail Page;
+    :Load Detail Filters;
+    :Call CTS_MatchMonitor_Details_GetFilter [SP];
+    :Load Detail Tickets;
+    :Call CTS_MatchMonitor_Details_GetTicket [SP];
+  if (User Actions?) then (yes)
+    if (Apply Filters?) then (yes)
+      :Reload Tickets with New Filters;
+    endif
+    if (Detect Association?) then (yes)
+      :DetectGroupAssWithOptions();
+    endif
+    if (Export Excel?) then (yes)
+      :ExportToExcelMMDetail();
+      :Generate Excel File;
+    endif
+  else (no)
+  endif
+else (no)
+endif
+stop
+
+@enduml
+

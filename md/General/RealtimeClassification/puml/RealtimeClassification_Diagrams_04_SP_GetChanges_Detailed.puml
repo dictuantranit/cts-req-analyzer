@@ -1,0 +1,117 @@
+@startuml RealtimeClassification_SP_GetChanges_Detailed
+!theme plain
+title Stored Procedure: CTS_GeneralNormalClassification_RealTime_GetChanges - Detailed Flow
+
+card "**SP: CTS_GeneralNormalClassification_RealTime_GetChanges**" as SP {
+  rectangle "**Database**: bodb_VR2Model (SQL Server)" as DB
+  rectangle "**Timeout**: 300 seconds" as Timeout
+}
+
+start
+
+partition "Input/Output Parameters" {
+  :Declare OUTPUT parameter;
+  note right
+      @ScannedMaxId BIGINT OUTPUT
+      
+      Purpose: Track maximum ID processed
+      for completion and cleanup
+  end note
+}
+
+partition "Get New Place Bet Customers" {
+  :Create temp table for results;
+  note right
+      CREATE TABLE #tmpResult (
+        ID BIGINT,
+        CustId BIGINT,
+        SportId INT
+      )
+  end note
+  
+  :Query RealtimeChanges table;
+  note right
+      INSERT INTO #tmpResult
+      SELECT TOP 20000
+        ID,
+        CustId,
+        SportId
+      FROM CustomerClassification_RealtimeChanges
+      ORDER BY ID ASC;
+      
+      **Purpose**:
+      - Get customers with new place bets
+      - Limit to 20000 for performance
+      - Order by ID to process sequentially
+      
+      **Table Structure**:
+      - ID (PK, IDENTITY): Incremental ID
+      - CustId: Customer ID
+      - SportId: Sport ID of the bet
+      - CreatedDate: When bet was placed
+  end note
+  
+  :Calculate ScannedMaxId;
+  note right
+      SELECT @ScannedMaxId = MAX(ID)
+      FROM #tmpResult;
+      
+      Used later to delete processed records
+  end note
+}
+
+partition "Return Result Set" {
+  :Prepare result set with distinct customers;
+  note right
+      SELECT DISTINCT
+        CustId,
+        SportId
+      FROM #tmpResult
+      ORDER BY CustId, SportId;
+      
+      **Why DISTINCT?**
+      - Same customer might have multiple bets
+      - We only need to process each customer once
+      - SportId included for sport-specific logic
+  end note
+  
+  :Return ResultSet + OUTPUT parameter;
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TABLE #tmpResult;
+  end note
+}
+
+note right
+  **Key Logic**:
+  1. Get TOP 20000 records from RealtimeChanges
+  2. Order by ID ASC (sequential processing)
+  3. Return DISTINCT customers (CustId, SportId)
+  4. Output ScannedMaxId for cleanup
+  
+  **Tables Accessed**:
+  - CustomerClassification_RealtimeChanges (READ)
+    * ID (PK, IDENTITY)
+    * CustId (FK to Customer)
+    * SportId (Sport of bet)
+    * CreatedDate (Timestamp)
+  
+  **Performance**:
+  - TOP 20000: Limits memory usage
+  - INDEX on ID: Fast ordering
+  - DISTINCT: Removes duplicates
+  - Temp table: Avoids multiple scans
+  
+  **Trigger**:
+  - Records inserted by betting system
+  - On each new place bet
+  - Real-time data capture
+end note
+
+stop
+
+@enduml
+

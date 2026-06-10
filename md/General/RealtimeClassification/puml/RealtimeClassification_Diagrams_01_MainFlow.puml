@@ -1,0 +1,127 @@
+@startuml RealtimeClassification_MainFlow
+!theme plain
+title Realtime Classification - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationJobs/scanningRealtimeClassification
+    Parameters:
+    - batchExternalSize (int)
+    - batchInternalSize (int, default: 5000)
+end note
+
+:RealtimeClassificationJobService.Execute(batchExternalSize, batchInternalSize);
+
+:Start();
+  :Initialize customers and customerCategories models;
+
+:GetNewPlaceBetCustomers();
+  :Call CTS_GeneralNormalClassification_RealTime_GetChanges [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Timeout: 300 seconds
+      
+      Parameters:
+      - @ScannedMaxId (OUTPUT)
+      
+      Logic:
+      - Get TOP 20000 from CustomerClassification_RealtimeChanges
+      - Order by ID ASC
+      - Return: CustId, SportId
+      - Output: ScannedMaxId (MAX ID)
+      
+      Returns:
+      - CustomerNewPlaceBets (CustId, SportId)
+      - ScannedMaxId
+  end note
+
+if (Has Customers?) then (yes)
+  :Chunk customers by batchInternalSize;
+  
+  repeat :For each chunk
+    :GetCustomerCategory(custBatch);
+      :Call CTS_DC_CustClassification_Realtime_GetCategory [SP];
+      note right
+          Database: CTS_DataCenter (MySQL)
+          Parameters:
+          - ip_CustIDs (comma-separated)
+          
+          Logic:
+          - Get current classification
+          - Categorize customers:
+            * NULL or Normal → CustomerCategory
+            * PA or PotentialPA → CustomerPADailyScan
+          
+          Returns:
+          - ResultSet 1: CustomerCategory (CustId list)
+          - ResultSet 2: CustomerPADailyScan (CustId list)
+      end note
+      :Add to customerCategories collections;
+  repeat while (More chunks?)
+  
+  partition "Parallel Processing" {
+    fork
+      :PreprocessCustomerClassRealtime(batchInternalSize);
+        :Chunk CustomerCategory by batchInternalSize;
+        
+        repeat :For each chunk
+          :Call CTS_GeneralNormalClassification_Realtime_Preprocess [SP];
+          note right
+              Database: bodb_VR2Model (SQL Server)
+              Parameters:
+              - @ListCustId (comma-separated)
+              
+              Logic:
+              - Get Priority from Priority table
+              - Call NormalPool_Insert
+              - Insert customers into Normal Pool
+              
+              Purpose: Queue for NormalAccountClassification
+          end note
+        repeat while (More chunks?)
+    fork again
+      :InsertPADailyScanQueue(batchInternalSize);
+        :Chunk CustomerPADailyScan by batchInternalSize;
+        
+        repeat :For each chunk
+          :Call CTS_DC_CustClassification_DailyScanPA_InsertToQueue [SP];
+          note right
+              Database: CTS_DataCenter (MySQL)
+              Parameters:
+              - ip_CustIDs (comma-separated)
+              
+              Logic:
+              - INSERT INTO DailyPAQueue
+              - Set CreatedTime = NOW()
+              
+              Purpose: Queue for DailyProblemClassification
+          end note
+        repeat while (More chunks?)
+    end fork
+  }
+  
+else (no)
+  note right
+    No customers with new place bets
+  end note
+endif
+
+:CompleteCustomerRealtime();
+  :Call CTS_GeneralNormalClassification_RealTime_Complete [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Parameters:
+      - @ScannedMaxId
+      
+      Logic:
+      - DELETE FROM RealtimeChanges
+      - WHERE ID <= @ScannedMaxId
+      - Prevents duplicate processing
+  end note
+
+:Return Success;
+stop
+
+@enduml
+

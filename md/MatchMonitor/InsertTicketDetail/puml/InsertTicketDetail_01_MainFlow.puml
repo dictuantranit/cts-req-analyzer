@@ -1,0 +1,195 @@
+@startuml InsertTicketDetail_MainFlow
+!theme plain
+title Match Monitor - Insert Ticket Detail - Main Flow (6 Steps)
+
+start
+
+:API Endpoint Called;
+note right
+  Live: MatchMonitorInsertTicketDetailLive
+  NonLive: MatchMonitorInsertTicketDetailNonLive
+  
+  Parameters:
+  - batchSize (default 5000)
+  - isLive (true/false)
+end note
+
+:Initialize Service;
+note right
+  Start(batchSize, isLive)
+  
+  Set parameters:
+  - LastScannedSequenceID_ParameterID
+  - PoolEnumType (Live/NonLive)
+end note
+
+partition "Step 1: Get Last Scanned SequenceID" {
+  :Read SystemParameter;
+  note right
+    Live: MatchMonitorLastScannedTrans
+    NonLive: MatchMonitorLastScannedTransNoneLive
+    
+    Example: LastScannedSequenceID = 1234567890
+  end note
+}
+
+partition "Step 2: Get Bettype Settings" {
+  :Query SportBettypeSetting;
+  note right
+    Filter by:
+    - FunctionID = MMBetType
+    - Status = 1 (Enabled)
+    
+    Get enabled sport/bettype combinations
+  end note
+  
+  :Build JSON String;
+  note right
+    [
+      {"SportTypeID": 1, "BetTypeID": 1},
+      {"SportTypeID": 1, "BetTypeID": 3},
+      ...
+    ]
+  end note
+}
+
+partition "Step 3: Get Match Trans from MainDB" {
+  if (batchSize > 0?) then (yes)
+    :Call SP: CTS_DC_MatchMonitor_Details_Get;
+    note right
+      Parameters:
+      - @ip_QueryType = 1 (Service)
+      - @ip_LastScannedSequenceID
+      - @ip_BatchSize = 5000
+      - @ip_IsLive = true/false
+      - @ip_ListSportBettype = JSON
+      
+      Result: List<TicketDetailEntity>
+    end note
+    
+    :Fetch Tickets from MainDB;
+    note right
+      WHERE SequenceID > LastScannedSequenceID
+      AND SportType/BettypeID IN (settings)
+      AND EventStatus = 'running' (Live)
+         OR EventStatus = 'settled' (NonLive)
+      LIMIT batchSize
+      
+      Fields:
+      - SequenceID, TransID, CustID
+      - MatchID, LeagueID, SportType
+      - Stake, Odds, BetTeam
+      - LiveHomeScore, LiveAwayScore
+      - KickOffTime, EventStatus
+    end note
+  else (no)
+    :Skip (no batch);
+  endif
+}
+
+if (Tickets found?) then (yes)
+  partition "Step 4: Insert to Staging (Parallel)" {
+    :Serialize Tickets to JSON;
+    note right
+      JsonConvert.SerializeObject(TicketStagings)
+      
+      Single JSON string with all tickets
+    end note
+    
+    :Get Pool Types;
+    note right
+      Live Pools:
+      - 1001: Group Betting
+      - 1002: Saba Group Betting
+      - 1003: Hedging
+      - 1004: Fixed Game
+      
+      NonLive Pools:
+      - 2001: Group Betting
+      - 2002: Saba Group Betting
+      - 2003: Hedging
+      - 2004: Arbitrage
+      - 2005: Fixed Game
+      - 2006: Irrigation
+    end note
+    
+    :Insert to All Pools (AsParallel);
+    note right
+      Enum.GetValues(PoolEnumType)
+        .Cast<int>()
+        .AsParallel()
+        .ForAll(poolType => ...)
+      
+      6 parallel executions of:
+      SP: CTS_DC_MatchMonitor_Staging_Insert
+      
+      Parameters:
+      - @ip_LiveIndicator = isLive
+      - @ip_PoolType = 1001-2006
+      - @ip_TransList = JSON (same for all)
+    end note
+    
+    fork
+      :Insert Pool 1001/2001\n(Group Betting);
+    fork again
+      :Insert Pool 1002/2002\n(Saba GB);
+    fork again
+      :Insert Pool 1003/2003\n(Hedging);
+    fork again
+      :Insert Pool 1004/2004\n(Fixed Game/Arbitrage);
+    fork again
+      if (isLive?) then (no)
+        :Insert Pool 2005\n(Fixed Game);
+      else (yes)
+        :Skip (Live only 4 pools);
+      endif
+    fork again
+      if (isLive?) then (no)
+        :Insert Pool 2006\n(Irrigation);
+      else (yes)
+        :Skip (Live only 4 pools);
+      endif
+    end fork
+    
+    :All Pools Inserted;
+  }
+  
+  partition "Step 5: Update Last Scanned SequenceID" {
+    :Get Max SequenceID from Tickets;
+    note right
+      maxSequenceID = TicketStagings.Max(x => x.SequenceID)
+      
+      Example: 1234572890
+    end note
+    
+    :Update SystemParameter;
+    note right
+      SET Value = maxSequenceID
+      WHERE ParameterID = 
+        MatchMonitorLastScannedTrans (Live) OR
+        MatchMonitorLastScannedTransNoneLive (NonLive)
+    end note
+  }
+  
+  :Return Success (true);
+else (no)
+  :No Tickets to Process;
+  :Return Success (true);
+endif
+
+stop
+
+note right
+  **Execution Frequency:**
+  - Live: Every 5 minutes
+  - NonLive: Every 5 minutes
+  
+  **Batch Size:**
+  - Default: 5000 tickets
+  
+  **Max Delay:**
+  - ~5 minutes from ticket creation
+end note
+
+@enduml
+

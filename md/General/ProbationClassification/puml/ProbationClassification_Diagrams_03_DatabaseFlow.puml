@@ -1,0 +1,281 @@
+@startuml ProbationClassification_DatabaseFlow
+title Probation Classification - Database Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam databaseBackgroundColor #E8F5E9
+skinparam databaseBorderColor #4CAF50
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+
+|Service Layer|
+start
+:JobRun(batchSize);
+
+note right
+  **Do-While Loop - Pagination Loop**:
+  Uses system parameters for progress tracking
+  Continue until all probation customers processed
+end note
+
+repeat
+  :Start();
+  note right
+    Initialize ProbationModel
+  end note
+
+  |DataAccess Layer|
+  :GetProbationCustForScanning(batchSize);
+  
+  |CTS_DataCenter (MySQL)|
+  :Execute SP: **CTS_DC_CustClassification_ProbationScan_Get**;
+  note right
+    **Database**: CTS_DataCenter.ctsService
+    **Timeout**: 300 seconds (5 minutes)
+    
+    **Purpose**: Get customers in probation period
+    **Input**: @ip_NoOfRecord (batch size)
+    **Output Parameters**:
+    - @op_LastCustID (long) - Last processed CustID
+    - @op_LastCategoryID (int) - Last processed CategoryID
+    
+    **Returns**: ProbationEntity[]
+    - CustId (long)
+    - SportGroupId (int)
+    
+    **Query Logic**:
+    ```sql
+    SELECT TOP @ip_NoOfRecord
+      CustID,
+      SportGroupID
+    FROM CTSCustomerClassification
+    WHERE ProbationEndDate > NOW()
+      AND CustID > @LastCustID  -- From system parameter
+    ORDER BY CustID, CategoryID
+    ```
+    
+    **Pagination**:
+    - Start from LastCustID (system parameter)
+    - Order by CustID, CategoryID
+    - Return last processed IDs for next batch
+    
+    **System Parameters Used**:
+    - DailyProbation_LastCustID (input)
+    - DailyProbation_LastCategoryID (input)
+  end note
+
+  :Return ProbationEntity[] + LastCustID + LastCategoryID;
+  
+  |Service Layer|
+  :Store ProbationModel;
+  note right
+    **ProbationModel Contents**:
+    - CustProbations (ProbationEntity[])
+    - LastCustID (for pagination)
+    - LastCategoryID (for pagination)
+  end note
+
+  if (Has probation customers?) then (yes)
+    :ClassifyProbation();
+    note right
+      Convert CustIDs to comma-separated string
+      Ex: "123456,789012,345678"
+    end note
+
+    |DataAccess Layer|
+    :ClassifyProbation(custToString);
+    
+    |bodb_VR2Model (SQL Server)|
+    :Execute SP: **CTS_GeneralNormalClassification_Probation_Preprocess**;
+    note right
+      **Database**: bodb_VR2Model.wsv_cts
+      **Timeout**: 300 seconds (5 minutes)
+      
+      **Purpose**: Re-classify probation customers
+      **Input**: Customer list (comma-separated string)
+      
+      **Processing Steps**:
+      
+      1. **Parse Input**:
+         - Split comma-separated CustIDs
+         - Create temp table #ProbationCustomers
+      
+      2. **Get Probation Performance**:
+         ```sql
+         SELECT 
+           c.CustID,
+           c.ProbationStartDate,
+           c.ProbationEndDate,
+           c.CurrentCategoryID,
+           SUM(t.TurnoverRM) AS TurnoverDuringProbation,
+           SUM(t.WinlossRM) AS WinlossDuringProbation,
+           COUNT(t.BetID) AS BetCountDuringProbation,
+           COUNT(DISTINCT t.BetDate) AS ActiveDaysDuringProbation
+         FROM CTSCustomerClassification c
+         JOIN CustomerTransaction t ON c.CustID = t.CustID
+         WHERE c.CustID IN (#ProbationCustomers)
+           AND t.TransactionDate BETWEEN c.ProbationStartDate AND NOW()
+         GROUP BY c.CustID
+         ```
+      
+      3. **Determine Category Change**:
+         **Improvement (Downgrade)**:
+         - PA + Improved → PotentialPA
+         - PA + Significantly Improved → Normal
+         - PotentialPA + Improved → Normal
+         
+         **Deterioration (Upgrade)**:
+         - PotentialPA + Worse → PA
+         - Normal + Worse → PotentialPA
+         
+         **Maintenance**:
+         - No significant change → Keep current category
+         - Extend probation if still PA/PotentialPA
+      
+      4. **Apply Re-Classification Rules**:
+         - Thresholds for improvement/deterioration
+         - Based on turnover, winloss, bet patterns
+         - Consider sport-specific rules
+      
+      5. **Update Classification**:
+         ```sql
+         UPDATE CTSCustomerClassification
+         SET 
+           CategoryID = @NewCategoryID,
+           CategoryName = @NewCategoryName,
+           ProbationEndDate = CASE 
+             WHEN @NewCategoryID IN (PA, PotentialPA) 
+             THEN DATEADD(DAY, 30, NOW())  -- Extend
+             ELSE NULL  -- Complete probation
+           END,
+           UpdatedDate = NOW()
+         WHERE CustID IN (#ProbationCustomers)
+         ```
+      
+      6. **Log Changes**:
+         - Record category changes
+         - Track probation outcomes
+         - Performance metrics
+      
+      **Re-Classification Matrix**:
+      | Current | Performance | New Category |
+      |---------|-------------|--------------|
+      | PA | Much better | Normal |
+      | PA | Better | PotentialPA |
+      | PA | Same/Worse | PA (extend) |
+      | PotentialPA | Better | Normal |
+      | PotentialPA | Worse | PA |
+      | PotentialPA | Same | PotentialPA (extend) |
+    end note
+
+    :Return void;
+  else (no)
+    note right
+      No probation customers to process
+    end note
+  endif
+
+  |Service Layer|
+  :UpdateLastScanDate();
+  
+  |System Parameters|
+  :Update DailyProbation_LastCustID;
+  |CTS_DataCenter (MySQL)|
+  :UPDATE SystemParameter;
+  note right
+    **Update Query**:
+    ```sql
+    UPDATE CTS_SystemParameter
+    SET Value = @LastCustID,
+        UpdatedDate = NOW()
+    WHERE ParameterKey = 'DailyProbation_LastCustID'
+    ```
+    
+    **Purpose**: Track progress for next batch
+    **Enables**: Resumable processing
+  end note
+
+  |System Parameters|
+  :Update DailyProbation_LastCategoryID;
+  |CTS_DataCenter (MySQL)|
+  :UPDATE SystemParameter;
+  note right
+    **Update Query**:
+    ```sql
+    UPDATE CTS_SystemParameter
+    SET Value = @LastCategoryID,
+        UpdatedDate = NOW()
+    WHERE ParameterKey = 'DailyProbation_LastCategoryID'
+    ```
+    
+    **Purpose**: Secondary pagination key
+  end note
+
+  |Service Layer|
+  :Check if more customers exist;
+  note right
+    **isContinue Logic**:
+    - true: CustProbations.Any() = more to process
+    - false: CustProbations is empty = all done
+    
+    **Return**: bool (isContinue)
+  end note
+
+repeat while (isContinue = true?) is (yes)
+-> no;
+
+|Service Layer|
+:Complete;
+note right
+  **Job Completion**:
+  - All probation customers processed
+  - System parameters at final position
+  - Ready for next job run (starts from LastCustID)
+  
+  **Next Job Run**:
+  - Resets LastCustID and LastCategoryID to 0
+  - Starts from beginning
+  - Processes new probation customers
+end note
+
+note right
+  **Database Architecture**:
+  
+  **CTS_DataCenter (MySQL)**:
+  - CTSCustomerClassification (probation data)
+  - CTS_SystemParameter (pagination tracking)
+  - Read-heavy operations
+  
+  **bodb_VR2Model (SQL Server)**:
+  - CustomerTransaction (betting data)
+  - BetDetails (bet information)
+  - Complex calculations and joins
+  - Re-classification logic
+  
+  **Pagination Mechanism**:
+  1. System parameters store progress
+  2. Each batch updates LastCustID/LastCategoryID
+  3. Next batch starts from last position
+  4. No risk of re-processing
+  5. Survives job interruptions
+  
+  **Performance Considerations**:
+  - Batch size: 5000-10000 customers
+  - Timeout: 300 seconds per SP
+  - Indexed on CustID, ProbationEndDate
+  - Efficient pagination with ORDER BY
+  
+  **Re-Classification Logic**:
+  - Based on probation performance
+  - Compares before vs during probation
+  - Determines improvement/deterioration
+  - Updates category accordingly
+  - Extends/completes probation
+end note
+
+stop
+
+@enduml
+

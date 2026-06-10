@@ -1,0 +1,342 @@
+@startuml MatchMonitorGroupBetting_StagingFlow
+!theme plain
+title Match Monitor Group Betting - Staging Flow (Insert Ticket Detail)
+
+start
+
+:API Endpoint Called;
+note right
+    POST /api/matchmonitor/MatchMonitorInsertTicketDetailLive
+    or POST /api/matchmonitor/MatchMonitorInsertTicketDetailNonLive
+    
+    Parameters:
+    - size: Batch size (e.g., 1000)
+    
+    Controller Method:
+    MatchMonitorInsertTicketDetailLive([FromForm] int size)
+    MatchMonitorInsertTicketDetailNonLive([FromForm] int size)
+end note
+
+:MatchMonitorJobService.InsertTicketDetail(size, isLive);
+
+:Get Service Instance;
+note right
+    _serviceProvider.GetService<IMatchMonitorStagingService>()
+    
+    Service: MatchMonitorStagingService
+    Pattern: Fluent Interface (Method Chaining)
+end note
+
+:Start(batchSize, isLive);
+note right
+    Initialize service state:
+    
+    BatchSize = batchSize
+    IsLive = isLive
+    TicketStagings = Empty
+    
+    if (IsLive) {
+        LastScannedSequenceID_ParameterID = 
+            SystemParameters.MatchMonitorLastScannedTrans
+        PoolEnumType = MatchMonitorStagingLivePoolType
+    } else {
+        LastScannedSequenceID_ParameterID = 
+            SystemParameters.MatchMonitorLastScannedTransNoneLive
+        PoolEnumType = MatchMonitorStagingNonLivePoolType
+    }
+end note
+
+:GetLastScannedSequenceID();
+:Call: _systemParameter.GetLastScannedId(ParameterID);
+
+:Database Query;
+note right
+    Database: CTS_DataCenter (MySQL)
+    Table: SystemParameter
+    
+    SELECT ParameterValue
+    FROM SystemParameter
+    WHERE ParameterID = @ParameterID
+    
+    For Live: ParameterID = MatchMonitorLastScannedTrans
+    For Non-Live: ParameterID = MatchMonitorLastScannedTransNoneLive
+    
+    Returns: LastScannedSequenceID (e.g., 12345678)
+end note
+
+:LastScannedSequenceID = Result;
+
+:GetMatchTrans();
+
+if (BatchSize > 0?) then (yes)
+    :GetBettypeSettings();
+    note right
+        Create BetTypeSettingParaModel:
+        - FunctionID = MMBetType (Match Monitor Bet Type)
+        - BettypeIDList = null (get all)
+        - SportTypeIDList = null (get all)
+        - IsFilterMMDetection = true
+        - IsFilterMMParlayDetection = false
+        - IsShowDetailsX = false
+        - Status = 1 (active only)
+        
+        Call: _systemParameter.GetBetTypeSettings(paras)
+    end note
+    
+    :Get BetType Settings from Database;
+    note right
+        Database: CTS_DataCenter (MySQL)
+        Table: BetTypeSettings
+        
+        SELECT SportTypeID, BetTypeID, BetChoiceType, BetIDPattern
+        FROM BetTypeSettings
+        WHERE FunctionID = @FunctionID
+            AND Status = 1
+            AND IsFilterMMDetection = 1
+        
+        Returns: BetTypeInfo[]
+        Convert to JSON: betTypeInfosJson
+    end note
+    
+    :GetTicketStaging(lastScannedSequenceID, batchSize, isLive, betTypeInfos);
+    :Call: _dataAccess.GetMatchTrans(parameters);
+    
+    :Database Query - Get Transactions;
+    note right
+        Database: MainDB (SQL Server)
+        Stored Procedure: CTS_MatchMonitor_GetTicketTrans
+        
+        Input Parameters:
+        - @LastSequenceID = 12345678
+        - @BatchSize = 1000
+        - @IsLive = 1 (or 0)
+        - @BetTypeInfos = '[{"SportTypeID":1,"BetTypeID":2,...}]'
+        
+        Query Logic:
+        SELECT TOP (@BatchSize)
+            SequenceID,
+            MatchID,
+            BetID,
+            BettypeID,
+            CustID,
+            CTSCustID,
+            Amount,
+            Odds,
+            Betteam,
+            ScoreDiff,
+            SportType,
+            LicenseCustID,
+            DeviceID,
+            IPAddress,
+            BetTime,
+            ...
+        FROM TicketTrans
+        WHERE SequenceID > @LastSequenceID
+            AND IsLive = @IsLive
+            AND BettypeID IN (
+                SELECT BettypeID 
+                FROM OPENJSON(@BetTypeInfos)
+                WITH (BettypeID int '$.BettypeID')
+            )
+        ORDER BY SequenceID ASC
+        
+        Returns: TicketDetailEntity[] (max 1000 records)
+    end note
+    
+    :TicketStagings = Result;
+    
+else (no)
+    :TicketStagings = Empty;
+endif
+
+:InsertMatchMonitorStagingWithParallel();
+
+if (TicketStagings.IsNotNullOrEmpty()?) then (yes)
+    :Convert TicketStagings to JSON;
+    note right
+        var ticketStagingJson = JsonConvert.SerializeObject(TicketStagings);
+        
+        JSON Structure:
+        [
+            {
+                "SequenceID": 12345679,
+                "MatchID": 987654,
+                "BetID": "AH",
+                "BettypeID": 1,
+                "CustID": "user123",
+                "CTSCustID": 5001,
+                "Amount": 100.00,
+                "Odds": 1.95,
+                "Betteam": "H",
+                "ScoreDiff": "0-0",
+                "SportType": 1,
+                ...
+            },
+            ...
+        ]
+    end note
+    
+    :Get All Pool Types;
+    note right
+        Enum.GetValues(PoolEnumType).Cast<int>()
+        
+        For Live:
+        - MatchMonitorStagingLivePoolType.GroupBetting = 1
+        - MatchMonitorStagingLivePoolType.Hedging = 2
+        - MatchMonitorStagingLivePoolType.Arbitrage = 3
+        - MatchMonitorStagingLivePoolType.FixedGame = 4
+        - MatchMonitorStagingLivePoolType.Irrigation = 5
+        - etc.
+        
+        For Non-Live: Similar enum values
+    end note
+    
+    fork
+        :Pool Type 1 (GroupBetting);
+        :InsertMatchMonitorStaging(JSON, isLive=1, poolType=1);
+        
+        :Database Insert;
+        note right
+            Database: CTS_DataCenter (MySQL)
+            SP: CTS_MatchMonitor_InsertStaging
+            
+            Input:
+            - @MatchTransJson = ticketStagingJson
+            - @IsLive = 1
+            - @PoolType = 1
+            
+            Logic:
+            INSERT INTO CTSMatchMonitorStaging (
+                MatchID, BetID, BettypeID,
+                CustID, CTSCustID,
+                Amount, Odds,
+                Betteam, ScoreDiff,
+                SportType, LicenseCustID,
+                DeviceID, IPAddress,
+                SequenceID, PoolType, IsLive,
+                IsProcessed, CreatedDate
+            )
+            SELECT 
+                MatchID, BetID, BettypeID,
+                CustID, CTSCustID,
+                Amount, Odds,
+                Betteam, ScoreDiff,
+                SportType, LicenseCustID,
+                DeviceID, IPAddress,
+                SequenceID, @PoolType, @IsLive,
+                0, NOW()
+            FROM JSON_TABLE(@MatchTransJson, '$[*]'
+                COLUMNS (
+                    MatchID BIGINT PATH '$.MatchID',
+                    BetID VARCHAR(20) PATH '$.BetID',
+                    ...
+                )
+            ) AS jt;
+        end note
+        
+    fork again
+        :Pool Type 2 (Hedging);
+        :InsertMatchMonitorStaging(JSON, isLive=1, poolType=2);
+        :Database Insert with PoolType=2;
+        
+    fork again
+        :Pool Type 3 (Arbitrage);
+        :InsertMatchMonitorStaging(JSON, isLive=1, poolType=3);
+        :Database Insert with PoolType=3;
+        
+    fork again
+        :Pool Type 4 (FixedGame);
+        :InsertMatchMonitorStaging(JSON, isLive=1, poolType=4);
+        :Database Insert with PoolType=4;
+        
+    fork again
+        :Pool Type 5...;
+        :More pool types...;
+        
+    end fork
+    
+    note right
+        All inserts run in PARALLEL using:
+        .AsParallel()
+        .ForAll(poolType => InsertMatchMonitorStaging(...))
+        
+        Benefits:
+        - Faster processing
+        - Better resource utilization
+        - Each pool has same data but different PoolType
+    end note
+    
+else (no)
+    :No tickets to insert;
+endif
+
+:UpdateLastScannedSequenceID();
+
+if (TicketStagings.IsNotNullOrEmpty()?) then (yes)
+    :Get Max SequenceID;
+    note right
+        var maxSequenceID = TicketStagings.Max(x => x.SequenceID).ToString();
+        
+        Example: If last ticket has SequenceID = 12346678
+        maxSequenceID = "12346678"
+    end note
+    
+    :Update SystemParameter;
+    :Call: _systemParameter.UpdateValueForSystemParamById(maxSequenceID, ParameterID);
+    
+    :Database Update;
+    note right
+        Database: CTS_DataCenter (MySQL)
+        Table: SystemParameter
+        
+        UPDATE SystemParameter
+        SET ParameterValue = '12346678',
+            ModifiedDate = NOW()
+        WHERE ParameterID = @ParameterID
+        
+        This marks the last processed SequenceID
+        Next run will start from 12346679
+    end note
+    
+else (no)
+    :Skip update (no new data);
+endif
+
+:Return Success;
+
+stop
+
+note right
+    ===================================================
+    STAGING PHASE COMPLETE
+    ===================================================
+    
+    Result:
+    - Tickets inserted into CTSMatchMonitorStaging
+    - Multiple pools (GroupBetting, Hedging, etc.)
+    - LastScannedSequenceID updated
+    - Ready for Phase 2: Rule Processing
+    
+    Key Tables:
+    - CTSMatchMonitorStaging (main staging table)
+        Columns:
+        - MatchID, BetID, BettypeID
+        - CustID, CTSCustID
+        - Amount, Odds, Betteam, ScoreDiff
+        - SportType, LicenseCustID
+        - DeviceID, IPAddress
+        - SequenceID (unique incremental ID)
+        - PoolType (1=GB, 2=Hedging, etc.)
+        - IsLive (1=Live, 0=Non-Live)
+        - IsProcessed (0=Pending, 1=Done)
+        - CreatedDate, ProcessedDate
+    
+    Performance Notes:
+    - Batch size: Configurable (typically 1000)
+    - Parallel insert: Simultaneous to all pools
+    - Incremental: Uses SequenceID for tracking
+    - Idempotent: Safe to re-run (SequenceID prevents duplicates)
+end note
+
+@enduml
+

@@ -1,0 +1,165 @@
+@startuml FixedGame_DatabaseFlow
+!theme plain
+title Fixed Game Detection - Database Flow (All Stored Procedures)
+
+' Define colors
+!define GET_COLOR #E3F2FD
+!define PROCESS_COLOR #FFF9C4
+!define COMPLETE_COLOR #C8E6C9
+!define CLEAN_COLOR #FFCCBC
+
+' ============================================
+' STORED PROCEDURE 1: GET
+' ============================================
+partition "**SP 1: CTS_DC_MatchMonitor_RuleFixedGame_Get**" GET_COLOR {
+    start
+    
+    :Input:\n- ip_LiveIndicator (BOOLEAN);
+    
+    :Read SystemParameter\nfor LastSequenceID;
+    note right
+        Live: ParameterID = 100
+        NonLive: ParameterID = 101
+    end note
+    
+    :Read SystemParameter\nfor BatchSize;
+    note right
+        Live: ParameterID = 126
+        NonLive: ParameterID = 127
+    end note
+    
+    :Query staging table:\nMatchMonitorStagingFixedGame[Live/NonLive];
+    
+    :SELECT MAX(SequenceID)\nFROM (SELECT SequenceID LIMIT BatchSize)\nWHERE SequenceID > LastSequenceID;
+    
+    :Store in op_MaxSequenceID;
+    
+    :SELECT DISTINCT\nMatchID, ScoreDiff, BettypeID,\nBetID, HDP, Betteam\nWHERE SequenceID BETWEEN\nLastSequenceID AND MaxSequenceID;
+    
+    :Output:\n- op_MaxSequenceID\n- List of match keys;
+}
+
+' ============================================
+' STORED PROCEDURE 2: PROCESS
+' ============================================
+partition "**SP 2: CTS_DC_MatchMonitor_RuleFixedGame_Process**" PROCESS_COLOR {
+    :Input:\n- ip_LiveIndicator\n- ip_MaxSequenceID\n- ip_MatchID\n- ip_ScoreDiff\n- ip_BettypeID\n- ip_BetID\n- ip_HDP\n- ip_Betteam;
+    
+    :Read LastSequenceID\nfrom SystemParameter;
+    
+    :Get SportType and IsMajorLeague\nfrom staging table\nfor this match;
+    
+    :SELECT rule settings\nFROM MatchMonitorRuleSetting\nWHERE SportType = ?\nAND RuleGroupID = 2\nAND RuleStatus = 1;
+    
+    note right
+        Rule settings:
+        - TimeStep
+        - TotalTicket
+        - HighStake
+        - HighStakeTicketPercent
+        - OddsSpread
+        - Reason
+    end note
+    
+    :Calculate FromTransDate:\nTO_SECONDS(TIMESTAMPADD(SECOND,\nTimeStep, MIN(TransDate)));
+    
+    :CREATE TEMPORARY TABLE Temp_Trans;
+    
+    :INSERT INTO Temp_Trans\nSELECT TransID, SequenceID, CustID,\nStake, Odds, SIGN(Odds),\nTO_SECONDS(TransDate)\nFROM staging table\nWHERE MatchID = ? AND ScoreDiff = ?\nAND BettypeID = ? AND BetID = ?\nAND HDP = ? AND Betteam = ?\nAND SequenceID <= MaxSequenceID;
+    
+    :CREATE TEMPORARY TABLE\nTemp_MatchMonitorGroupInSecond;
+    
+    :Group tickets by TimeToSecond\nusing TimeStep intervals;
+    
+    :Calculate for each group:\n- TotalTicket\n- TotalHighStake\n- MinOdds, MaxOdds\n- MinNegativeOdds, MinPositiveOdds\n- MinSignNumber, MaxSignNumber;
+    
+    :CREATE TEMPORARY TABLE\nTemp_FixedTransRange;
+    
+    :Apply Rule A (Same Sign):\nINSERT INTO Temp_FixedTransRange\nWHERE TotalTicket > Rule_TotalTicket\nAND (TotalHighStake/TotalTicket) > Rule_HighStakeTicketPercent\nAND ABS(ABS(MaxOdds) - ABS(MinOdds))*100 >= Rule_OddsSpread\nAND TimeToSecond >= FromTransDate\nAND MinSignNumber = MaxSignNumber;
+    
+    :Apply Rule B (Different Signs):\nINSERT INTO Temp_FixedTransRange\nWHERE TotalTicket > Rule_TotalTicket\nAND (TotalHighStake/TotalTicket) > Rule_HighStakeTicketPercent\nAND ((1-ABS(MinNegativeOdds))+(1-ABS(MinPositiveOdds)))*100 >= Rule_OddsSpread\nAND TimeToSecond >= FromTransDate\nAND MinSignNumber != MaxSignNumber;
+    
+    :SELECT Reason,\nGROUP_CONCAT(DISTINCT TransID),\nGROUP_CONCAT(DISTINCT CustID)\nFROM Temp_Trans\nINNER JOIN Temp_FixedTransRange\nON SequenceID BETWEEN\nMinSequenceID AND MaxSequenceID;
+    
+    :Output:\n- Reason\n- TransIDList\n- CustIDList;
+}
+
+' ============================================
+' STORED PROCEDURE 3: COMPLETE
+' ============================================
+partition "**SP 3: CTS_DC_MatchMonitor_RuleFixedGame_Complete**" COMPLETE_COLOR {
+    :Input:\n- ip_LiveIndicator\n- ip_MaxSequenceID\n- ip_MatchID\n- ip_ScoreDiff\n- ip_BettypeID\n- ip_BetID\n- ip_HDP\n- ip_Betteam\n- ip_TransGroup (JSON);
+    
+    :CREATE TEMPORARY TABLE Temp_TransGroup;
+    
+    :Parse JSON into Temp_TransGroup:\nINSERT INTO Temp_TransGroup\nSELECT Reason, TransIDList, CustIDList\nFROM JSON_TABLE(ip_TransGroup);
+    
+    :Get match info from staging table:\nEventDate, LiveHomeScore, LiveAwayScore,\nKickOffTime, EventStatus, HomeID, AwayID,\nLeagueID, LeagueName, Sporttype, IsMajorLeague;
+    
+    :Check if match exists:\nSELECT ID, ListTransID, ListCustID\nFROM MatchMonitorDetails\nWHERE LiveIndicator = ?\nAND MatchID = ?\nAND BettypeID = ?\nAND BetID = ?\nAND ScoreDiff = ?\nAND Betteam = ?\nAND HDP = ?\nAND Reason = ?;
+    
+    if (Match exists?) then (yes)
+        :CREATE TEMPORARY TABLE\nTemp_DetailsTransIDList;
+        
+        :CREATE TEMPORARY TABLE\nTemp_DetailsCustIDList;
+        
+        :INSERT existing TransIDs\ninto Temp_DetailsTransIDList;
+        
+        :INSERT new TransIDs\ninto Temp_DetailsTransIDList;
+        
+        :INSERT existing CustIDs\ninto Temp_DetailsCustIDList;
+        
+        :INSERT new CustIDs\ninto Temp_DetailsCustIDList;
+        
+        :UPDATE MatchMonitorDetails\nSET ListCustID = GROUP_CONCAT(Temp_DetailsCustIDList.CustID),\nListTransID = GROUP_CONCAT(Temp_DetailsTransIDList.TransID)\nWHERE ID = lv_DetailsID;
+        
+    else (no)
+        :INSERT INTO MatchMonitorDetails\n(MatchID, IsMajorLeague, LiveIndicator,\nScoreDiff, BettypeID, BetID, Betteam, HDP,\nEventDate, LiveHomeScore, LiveAwayScore,\nListCustID, ListTransID, Reason, GroupID)\nVALUES (...);
+        
+        :INSERT IGNORE INTO MatchMonitor\n(MatchID, IsMajorLeague, BettypeID, BetID,\nLiveIndicator, EventDate, KickOffTime,\nEventStatus, HomeID, AwayID, LeagueID,\nLeagueName, Sporttype, Reason)\nVALUES (...);
+    endif
+    
+    :Get MaxTransDate from staging table;
+    
+    :Output: Success;
+}
+
+' ============================================
+' STORED PROCEDURE 4: CLEAN
+' ============================================
+partition "**SP 4: CTS_DC_MatchMonitor_RuleFixedGame_StagingClean**" CLEAN_COLOR {
+    :Input:\n- ip_LiveIndicator\n- ip_MaxSequenceID;
+    
+    if (ip_LiveIndicator = 1?) then (yes)
+        :DELETE FROM\nMatchMonitorStagingFixedGameLive\nWHERE SequenceID <= ip_MaxSequenceID;
+        
+        :UPDATE SystemParameter\nSET ParameterValue = ip_MaxSequenceID\nWHERE ParameterID = 100;
+    else (no)
+        :DELETE FROM\nMatchMonitorStagingFixedGameNonLive\nWHERE SequenceID <= ip_MaxSequenceID;
+        
+        :UPDATE SystemParameter\nSET ParameterValue = ip_MaxSequenceID\nWHERE ParameterID = 101;
+    endif
+    
+    :Output: Success;
+    
+    stop
+}
+
+floating note right
+    **Data Flow Summary:**
+    
+    1. GET: Query staging for new matches
+    2. PROCESS: Detect suspicious patterns
+    3. COMPLETE: Save results to MatchMonitor
+    4. CLEAN: Remove processed data
+    
+    **Key Tables:**
+    - MatchMonitorStagingFixedGame[Live/NonLive]
+    - MatchMonitor (match records)
+    - MatchMonitorDetails (ticket details)
+    - MatchMonitorRuleSetting (detection rules)
+    - SystemParameter (tracking state)
+end note
+
+@enduml
+

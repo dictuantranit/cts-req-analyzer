@@ -1,0 +1,192 @@
+@startuml Irrigation_MainFlow
+!theme plain
+title Match Monitor - Irrigation Detection - Main Flow (4 Phases)
+
+start
+
+:API Endpoint Called;
+note right
+  MatchMonitorProcessRuleIrrigationNonLive
+  
+  IMPORTANT: NonLive ONLY!
+  No live irrigation detection.
+  
+  Parameters:
+  - numberOfThread (default 4)
+end note
+
+partition "Phase 1: GET STAGING MATCHES" {
+  :Call GetMatchMonitorRuleIrrigation;
+  note right
+    SP: CTS_DC_MatchMonitor_RuleIrrigation_Get
+    
+    Input:
+    - ip_LiveIndicator = false (NonLive only)
+    
+    Output:
+    - MatchStagingList (grouped matches)
+    - MaxSequenceID
+  end note
+  
+  :Read from Staging Table;
+  note right
+    Table: MatchMonitorStagingIrrigationNonLive
+    (Pool 2006)
+    
+    WHERE SequenceID > LastScannedSequenceID
+    LIMIT 5000 matches
+  end note
+  
+  :Group Matches by Key;
+  note right
+    GROUP BY:
+    - MatchID
+    - ScoreDiff
+    - BettypeID
+    - BetID
+    - HDP
+    - Betteam (h/a/d)
+    
+    Each group = MatchStagingRuleIrrigationModel
+  end note
+}
+
+if (Matches found?) then (yes)
+  partition "Phase 2: PROCESS EACH MATCH (Parallel)" {
+    :Process All Match Groups in Parallel;
+    note right
+      AsParallel()
+      .WithDegreeOfParallelism(numberOfThread)
+      
+      Default: 4 threads
+    end note
+    
+    fork
+      :Match Group 1;
+      :Get All Tickets;
+      :NO Association Detection;
+      note right
+        KEY DIFFERENCE:
+        - NO Device detection
+        - NO AI detection
+        - NO IP detection
+        
+        Only analyze INDIVIDUAL
+        customer patterns
+      end note
+      :Group by Customer (CustID);
+      :Calculate Odds Spread;
+      :Validate Stake Threshold;
+      :Call SP Process;
+      :Return: Detected Customers;
+    fork again
+      :Match Group 2;
+      :Get All Tickets;
+      :NO Association Detection;
+      :Group by Customer;
+      :Calculate Odds Spread;
+      :Validate Stake Threshold;
+      :Call SP Process;
+      :Return: Detected Customers;
+    fork again
+      :Match Group 3;
+      :Get All Tickets;
+      :NO Association Detection;
+      :Group by Customer;
+      :Calculate Odds Spread;
+      :Validate Stake Threshold;
+      :Call SP Process;
+      :Return: Detected Customers;
+    fork again
+      :Match Group 4;
+      :Get All Tickets;
+      :NO Association Detection;
+      :Group by Customer;
+      :Calculate Odds Spread;
+      :Validate Stake Threshold;
+      :Call SP Process;
+      :Return: Detected Customers;
+    end fork
+    
+    :Collect Results from All Matches;
+    note right
+      For each match:
+      - Detected customer groups
+      - With irrigation pattern
+    end note
+    
+    :Sleep 50ms between matches;
+  }
+  
+  partition "Phase 3: COMPLETE & SAVE" {
+    if (Has Detected Customers?) then (yes)
+      :Serialize TransGroupJson;
+      note right
+        JSON format:
+        [
+          {
+            "CustID": 12345,
+            "TotalStake": 1500,
+            "OddsSpread": 35,
+            "TransIDList": "...",
+            ...
+          }
+        ]
+      end note
+      
+      :Call SP Complete;
+      note right
+        SP: CTS_DC_MatchMonitor_RuleIrrigation_Complete
+        
+        Actions:
+        - INSERT CTSMatchMonitor (Reason='IR')
+        - INSERT CTSMatchMonitorDetail
+        - Mark timestamps
+      end note
+    else (no)
+      :No detections to save;
+    endif
+  }
+  
+  partition "Phase 4: CLEAN STAGING" {
+    :Call CleanTransRuleIrrigation;
+    note right
+      SP: CTS_DC_MatchMonitor_RuleIrrigation_TransClean
+      
+      DELETE FROM MatchMonitorStagingIrrigationNonLive
+      WHERE SequenceID <= MaxSequenceID
+      
+      Clean processed tickets to free space
+    end note
+  }
+  
+  :Return Success (true);
+else (no)
+  :No matches to process;
+  :Return Success (true);
+endif
+
+stop
+
+note right
+  **Execution Frequency:**
+  - NonLive only: Every 5 minutes
+  
+  **Parallel Processing:**
+  - 4 threads (default)
+  
+  **Detection Criteria:**
+  - NO Association (simplest rule!)
+  - Single customer focus
+  - Odds Spread >= 28%
+  - Total Stake >= $1000
+  - Time Window: 180 seconds (3 min)
+  
+  **Key Difference:**
+  - No Device/AI/IP detection
+  - Only analyzes individual customers
+  - Focus on odds variation pattern
+end note
+
+@enduml
+

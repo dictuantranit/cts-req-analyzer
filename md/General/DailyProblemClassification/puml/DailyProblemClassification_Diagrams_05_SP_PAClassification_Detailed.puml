@@ -1,0 +1,274 @@
+@startuml DailyProblemClassification_SP_PAClassification
+title CTS_ProblemAccountsClassification_Daily - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #FFE0B2
+skinparam activityBorderColor #FF6F00
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_ProblemAccountsClassification_Daily
+  **Database**: bodb_VR2Model.wsv_cts (SQL Server)
+  **Timeout**: 1200 seconds (20 minutes)
+  **Parameters**: Customer list from queue
+  **Called From**: ProblemAccountServices.GetProblemAccountLosingClassification()
+  
+  **Function ID**: ProblemDailyJob
+  **Long Timeout Reason**: Complex PA calculations
+end note
+
+partition "Input Processing" {
+  :Receive Customer List;
+  note right
+    **Input**: PADailyScanFromQueueEntity[]
+    - CustID (long)
+    - DWSportType (int)
+    
+    **Source**: DailyPAQueue
+  end note
+
+  :Parse Customer IDs;
+  :Create temp table #TempCustomers;
+  note right
+    **Temp Table**:
+    - CustID
+    - DWSportType
+    - Used for joining with transaction data
+  end note
+}
+
+partition "Get Customer Transaction Data" {
+  :Query customer betting history;
+  note right
+    **Data Sources**:
+    - Bet transactions (completed bets)
+    - Winloss records
+    - Turnover records
+    - Performance period: Last 30 days (configurable)
+    
+    **Joined Tables**:
+    - CustomerTransaction
+    - BetDetails
+    - SettlementInfo
+  end note
+
+  :Filter by date range;
+  note right
+    **Date Filter**:
+    - Performance period: 30/60/90 days
+    - Only settled bets
+    - Exclude cancelled/void bets
+  end note
+}
+
+partition "Calculate Losing Performance" {
+  :Calculate Turnover per customer;
+  note right
+    **Turnover Calculation**:
+    - SUM(BetAmount) per CustID
+    - In RM (Malaysia Ringgit)
+    - All sports aggregated
+    - Decimal precision: 2
+    
+    **Formula**:
+    TurnoverRM = SUM(BetAmount)
+  end note
+
+  :Calculate Winloss per customer;
+  note right
+    **Winloss Calculation**:
+    - SUM(Winloss) per CustID
+    - Negative = Customer loss (good for company)
+    - Positive = Customer win (bad for company)
+    - In RM
+    
+    **Formula**:
+    WinlossRM = SUM(Winloss)
+    
+    **PA Focus**:
+    - Looking for large losses (negative winloss)
+    - High loss = Potential PA
+  end note
+
+  :Calculate Bet Count per customer;
+  note right
+    **Bet Count**:
+    - COUNT(BetID) per CustID
+    - Total number of bets
+    - Indicates betting frequency
+    
+    **Formula**:
+    BetCount = COUNT(BetID)
+  end note
+
+  :Calculate Active Days per customer;
+  note right
+    **Active Days**:
+    - COUNT(DISTINCT BetDate) per CustID
+    - Number of days with bets
+    - Indicates betting consistency
+    
+    **Formula**:
+    ActiveDays = COUNT(DISTINCT BetDate)
+  end note
+
+  :Get Performance Time;
+  note right
+    **Performance Time**:
+    - Date range of calculation
+    - Start date and end date
+    - Used for historical tracking
+  end note
+}
+
+partition "Apply PA Classification Rules" {
+  :Determine PA Category;
+  note right
+    **PA Categorization Logic**:
+    Based on losing performance thresholds
+    
+    **Category Rules**:
+    1. **PA (Problem Account)**:
+       - High loss amount (e.g., > RM 10,000)
+       - High turnover (e.g., > RM 50,000)
+       - Consistent betting (ActiveDays > 15)
+       - Significant losing trend
+       
+    2. **PotentialPA**:
+       - Medium loss amount (e.g., RM 5,000-10,000)
+       - Medium turnover (e.g., RM 20,000-50,000)
+       - Moderate betting activity
+       - Developing losing pattern
+       
+    **Thresholds**:
+    - Configurable per sport
+    - Adjustable per company policy
+    - Based on historical data
+  end note
+
+  if (High loss amount?) then (yes)
+    if (High turnover?) then (yes)
+      if (Consistent betting?) then (yes)
+        :Assign CategoryID = PA;
+        note right
+          **PA Customer**:
+          - High risk
+          - Requires monitoring
+          - Probation period applies
+          - Special handling
+        end note
+      else (no)
+        :Assign CategoryID = PotentialPA;
+      endif
+    else (no)
+      :Assign CategoryID = PotentialPA;
+    endif
+  elseif (Medium loss amount?) then (yes)
+    :Assign CategoryID = PotentialPA;
+    note right
+      **PotentialPA Customer**:
+      - Medium risk
+      - Watch for escalation
+      - May become PA
+      - Monitor closely
+    end note
+  else (no)
+    :No PA classification;
+    note right
+      **Below thresholds**:
+      - Not classified as PA
+      - May be removed from queue
+      - Normal customer
+    end note
+  endif
+}
+
+partition "Build Result" {
+  :Build ProblemAccountLosingClassificationEntity[];
+  note right
+    **Result Entity**:
+    - CustID
+    - CategoryID (PA/PotentialPA)
+    - TurnoverRM
+    - WinlossRM (negative for loss)
+    - BetCount
+    - ActiveDays
+    - PerformanceTime
+    - CategoryName
+    - Other PA metrics
+  end note
+
+  :Include additional PA metrics;
+  note right
+    **Additional Metrics**:
+    - Average bet size
+    - Win rate (%)
+    - Largest single loss
+    - Consecutive losing days
+    - Sport-specific metrics
+    - Risk score
+  end note
+}
+
+:Return ProblemAccountLosingClassificationEntity[];
+note right
+  **Return to Service Layer**:
+  - Used for InsertProblemAccountProbationClassification
+  - Contains all PA classification data
+  - Ready for database insertion
+  
+  **Next Steps**:
+  - Batch processing
+  - Insert into CTSCustomerClassification
+  - Insert PA logic
+  - Push to MainDB
+end note
+
+:Log Execution;
+note right
+  **Logging**:
+  - Customer count processed
+  - PA count identified
+  - PotentialPA count identified
+  - Execution time
+  - Any errors/warnings
+end note
+
+stop
+
+note bottom
+  **PA Classification Summary**:
+  
+  **Purpose**: Identify customers with significant losing performance
+  **Criteria**: Turnover, Winloss, BetCount, ActiveDays
+  **Categories**: PA (high risk), PotentialPA (medium risk)
+  **Action**: Probation period, monitoring, special handling
+  
+  **Business Logic**:
+  - PA customers are high-risk for company
+  - Large losses indicate potential issues
+  - Requires careful monitoring and management
+  - Probation period to observe behavior
+  - May require manual review
+  
+  **Performance Considerations**:
+  - Complex calculation (20 min timeout)
+  - Large dataset processing
+  - Multiple joins and aggregations
+  - Indexed tables for efficiency
+  - Batch processing recommended
+  
+  **Thresholds (Example)**:
+  | Category | TurnoverRM | WinlossRM (Loss) | ActiveDays |
+  |----------|-----------|------------------|------------|
+  | PA | > 50,000 | < -10,000 | > 15 |
+  | PotentialPA | > 20,000 | < -5,000 | > 10 |
+end note
+
+@enduml
+

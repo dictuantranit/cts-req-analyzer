@@ -1,0 +1,198 @@
+@startuml DangerMonitor_SP_Association_GetByUserNameList_Detailed
+!theme plain
+title CTS_DC_Association_GetByUserNameList - Detailed Database Flow
+
+skinparam component {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+skinparam arrow {
+    Color darkgreen
+}
+
+package "MySQL Database: CTS_DataCenter" {
+    database "CTSCustomer" as CTSCustomer
+    database "AssociationByDevice" as AssocByDevice
+    database "AssociationByAI" as AssocByAI
+    database "AssociationGroupByAI" as AssocGroupByAI
+    database "AssociationByIP" as AssocByIP
+    database "AssociationTypeSetting" as AssocTypeSetting
+}
+
+component "CTS_DC_Association_GetByUserNameList" as SP {
+    note right
+        **Database:** CTS_DataCenter (MySQL)
+        **Purpose:** Get Associated Accounts by Username List
+        **Association Types:**
+        - Device (Type 1)
+        - Betting Pattern/AI (Type 2)
+        - IP (Type 4)
+        **Parameters:**
+        - ip_UserNameList: Comma-separated usernames
+        - ip_HasDevice: Include Device associations
+        - ip_HasAI: Include Betting Pattern associations
+        - ip_HasIP: Include IP associations
+    end note
+}
+
+' Temp Tables
+package "Temp Tables (Internal)" {
+    component "Temp_Username" as TmpUsername
+    component "Temp_Cust" as TmpCust
+    component "Temp_Association" as TmpAssociation
+    component "Temp_CustDevice" as TmpCustDevice
+    component "Temp_AssociationByAI_AssType" as TmpAIAssType
+    component "Temp_CustGroupByAI" as TmpCustGroupByAI
+    component "Temp_AssociationByIP_AssType" as TmpIPAssType
+}
+
+note right of TmpCust
+    **Temp Table: Temp_Cust**
+    * CTSCustID : BIGINT UNSIGNED
+    * CustID : BIGINT UNSIGNED
+    **Purpose:** Map Username to CTSCustID and CustID
+end note
+
+note right of TmpAssociation
+    **Temp Table: Temp_Association**
+    * RootCustID : BIGINT UNSIGNED
+    * AssCustID : BIGINT UNSIGNED
+    * AssociationType : INT
+    **Purpose:** Store all found associations
+    **Types:** 1=Device, 2=BettingPattern, 4=IP
+end note
+
+' Flow: Parse Input Parameters
+SP --> TmpUsername : **INSERT**\n(Parse @ip_UserNameList)
+note right of SP
+    **Parse Logic:**
+    - Split comma-separated usernames
+    - Use dynamic SQL to insert
+    - Example: '12BETGBP01001,307HK'
+end note
+
+SP --> TmpCust : **INSERT**\n(Get CTSCustID, CustID)
+CTSCustomer --> TmpUsername : **JOIN**\nON Username
+
+' Flow: Association By Device
+SP --> SP : Check ip_HasDevice = 1
+SP --> TmpCustDevice : **INSERT**\n(Get Device IDs)
+TmpCust --> AssocByDevice : **JOIN**\nON CTSCustID
+
+SP --> TmpCustDevice : **DELETE**\n(Remove devices with no other customers)
+note right of SP
+    **Filter Logic:**
+    - Keep only devices that have
+      other customers (not just input customers)
+    - Must have CustSubID = 0
+end note
+
+SP --> TmpAssociation : **INSERT**\n(Device Associations)
+TmpCustDevice --> AssocByDevice : **JOIN**\nON DCSDeviceID
+AssocByDevice --> CTSCustomer : **JOIN**\nON CTSCustID
+note right of SP
+    **Association By Device:**
+    - Find other customers using same device
+    - AssociationType = 1
+    - Only CustSubID = 0
+end note
+
+' Flow: Association By Betting Pattern (AI)
+SP --> SP : Check ip_HasAI = 1
+SP --> TmpAIAssType : **INSERT**\n(Get Active AI Types)
+AssocTypeSetting --> TmpAIAssType : **SELECT**\nWHERE AssTypeID = 2 AND Active
+
+SP --> TmpAssociation : **INSERT**\n(AssociationByAI - FromCustID)
+TmpCust --> AssocByAI : **JOIN**\nON FromCustID
+AssocByAI --> CTSCustomer : **JOIN**\nON ToCustID
+TmpAIAssType --> AssocByAI : **EXISTS**\nON AssType
+
+SP --> TmpAssociation : **INSERT**\n(AssociationByAI - ToCustID)
+TmpCust --> AssocByAI : **JOIN**\nON ToCustID
+AssocByAI --> CTSCustomer : **JOIN**\nON FromCustID
+TmpAIAssType --> AssocByAI : **EXISTS**\nON AssType
+
+note right of SP
+    **Association By AI (Betting Pattern):**
+    - Bidirectional: FromCustID → ToCustID
+    - And: ToCustID → FromCustID
+    - Filter by active AssType from settings
+    - AssociationType = 2
+    - Only CustSubID = 0
+end note
+
+' Flow: Association By Group (AI)
+SP --> TmpCustGroupByAI : **INSERT**\n(Get Group IDs)
+TmpCust --> AssocGroupByAI : **JOIN**\nON CustID
+
+SP --> TmpCustGroupByAI : **DELETE**\n(Remove groups with no other customers)
+note right of SP
+    **Filter Logic:**
+    - Keep only groups that have
+      other customers (not just input customers)
+    - Must have CustSubID = 0
+end note
+
+SP --> TmpAssociation : **INSERT**\n(GroupByAI Associations)
+TmpCustGroupByAI --> AssocGroupByAI : **JOIN**\nON GroupID
+AssocGroupByAI --> CTSCustomer : **JOIN**\nON CustID
+note right of SP
+    **Association By Group (AI):**
+    - Find other customers in same AI group
+    - AssociationType = 2
+    - Only CustSubID = 0
+end note
+
+' Flow: Association By IP
+SP --> SP : Check ip_HasIP = 1
+SP --> TmpIPAssType : **INSERT**\n(Get Active IP Types)
+AssocTypeSetting --> TmpIPAssType : **SELECT**\nWHERE AssTypeID = 4 AND Active
+
+SP --> TmpAssociation : **INSERT**\n(AssociationByIP - FromCustID)
+TmpCust --> AssocByIP : **JOIN**\nON FromCustID
+AssocByIP --> CTSCustomer : **JOIN**\nON ToCustID
+TmpIPAssType --> AssocByIP : **EXISTS**\nON AssType
+
+SP --> TmpAssociation : **INSERT**\n(AssociationByIP - ToCustID)
+TmpCust --> AssocByIP : **JOIN**\nON ToCustID
+AssocByIP --> CTSCustomer : **JOIN**\nON FromCustID
+TmpIPAssType --> AssocByIP : **EXISTS**\nON AssType
+
+note right of SP
+    **Association By IP:**
+    - Bidirectional: FromCustID → ToCustID
+    - And: ToCustID → FromCustID
+    - Filter by active AssType from settings
+    - AssociationType = 4
+    - Only CustSubID = 0
+end note
+
+' Flow: Return Results
+SP --> TmpAssociation : **SELECT**\nGROUP BY RootCustID
+note right of SP
+    **Returns:**
+    - RootCustID
+    - AssCustIDList (comma-separated)
+      using GROUP_CONCAT
+    **Grouping:**
+    - GROUP BY RootCustID
+    - DISTINCT AssCustID
+    - Multiple AssociationTypes per pair
+      are allowed (separate rows)
+end note
+
+' Cleanup (MySQL auto-drops TEMPORARY tables)
+note right of SP
+    **Cleanup:**
+    MySQL automatically drops
+    TEMPORARY tables at end of session
+end note
+
+@enduml
+

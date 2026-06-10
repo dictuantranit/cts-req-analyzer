@@ -1,0 +1,132 @@
+@startuml FixedGame_DetectionLogic
+!theme plain
+title Fixed Game Detection - Detection Criteria Logic
+
+start
+
+:Load all tickets for match key\n(MatchID, ScoreDiff, BettypeID, BetID, HDP, Betteam);
+
+:Read rule settings from\nMatchMonitorRuleSetting;
+
+partition "**Rule Settings**" {
+    :RuleGroupID = 2\n(Fixed Game Detect);
+    :SportType (1=Soccer, 2=Basketball, 43=E-Sports);
+    :Reason = 3 (FG);
+    
+    note right
+        **Default Values:**
+        - TotalTicket: 40
+        - TimeStep: 420 seconds (7 min)
+        - HighStake: 500
+        - HighStakeTicketPercent: 0.35 (35%)
+        - OddsSpread: 10 (10%)
+    end note
+}
+
+:Load tickets into Temp_Trans\n(TimeToSecond, TransID, SequenceID,\nCustID, Stake, Odds, SignNumber);
+
+:Group tickets by time windows\nusing TimeStep intervals;
+
+partition "**Group Calculation**" {
+    :For each time window, calculate:;
+    
+    :TotalTicket = COUNT(*);
+    :TotalHighStake = COUNT(WHERE Stake >= HighStake);
+    :MinOdds = MIN(Odds);
+    :MaxOdds = MAX(Odds);
+    :MinNegativeOdds = MIN(Odds WHERE Odds < 0);
+    :MinPositiveOdds = MIN(Odds WHERE Odds > 0);
+    :MinSignNumber = MIN(SIGN(Odds));
+    :MaxSignNumber = MAX(SIGN(Odds));
+}
+
+partition "**Detection Rules**" {
+    if (TotalTicket > Rule_TotalTicket?) then (yes)
+        if ((TotalHighStake / TotalTicket) > Rule_HighStakeTicketPercent?) then (yes)
+            
+            if (MinSignNumber = MaxSignNumber?) then (yes - Same Sign)
+                note right
+                    **Rule A: Same Sign Odds**
+                    All bets on same outcome
+                    (e.g., all bets on Home team)
+                end note
+                
+                :Calculate OddsSpread:\nABS(ABS(MaxOdds) - ABS(MinOdds)) * 100;
+                
+                if (OddsSpread >= Rule_OddsSpread?) then (yes)
+                    if (TimeToSecond >= FromTransDate?) then (yes)
+                        :Add time window to\nTemp_FixedTransRange;
+                        :DETECTED by Rule A;
+                    else (no)
+                        :Skip (too old);
+                    endif
+                else (no)
+                    :Skip (odds spread too small);
+                endif
+                
+            else (no - Different Signs)
+                note right
+                    **Rule B: Different Sign Odds**
+                    Bets on both outcomes
+                    (e.g., some on Home, some on Away)
+                end note
+                
+                :Calculate OddsSpread:\n((1 - ABS(MinNegativeOdds)) + (1 - ABS(MinPositiveOdds))) * 100;
+                
+                if (OddsSpread >= Rule_OddsSpread?) then (yes)
+                    if (TimeToSecond >= FromTransDate?) then (yes)
+                        :Add time window to\nTemp_FixedTransRange;
+                        :DETECTED by Rule B;
+                    else (no)
+                        :Skip (too old);
+                    endif
+                else (no)
+                    :Skip (odds spread too small);
+                endif
+            endif
+            
+        else (no)
+            :Skip (high stake % too low);
+        endif
+    else (no)
+        :Skip (total tickets too low);
+    endif
+}
+
+partition "**Output Result**" {
+    :Join detected time windows\nwith original tickets;
+    
+    :GROUP_CONCAT(DISTINCT TransID) AS TransIDList;
+    :GROUP_CONCAT(DISTINCT CustID) AS CustIDList;
+    
+    if (TransIDList IS NOT NULL?) then (yes)
+        :Return detection result:\n- Reason = 3\n- TransIDList\n- CustIDList;
+        :MATCH DETECTED;
+    else (no)
+        :Return NULL;
+        :NO DETECTION;
+    endif
+}
+
+stop
+
+floating note right
+    **Example Detection:**
+    
+    **Input:**
+    - 45 tickets in 7 minutes
+    - 18 tickets with Stake >= 500
+    - All bets on Home team (odds: 1.83-1.87)
+    
+    **Checks:**
+    - TotalTicket (45) > 40 ✓
+    - HighStakePercent (40%) > 35% ✓
+    - OddsSpread: ABS(1.87 - 1.83) * 100 = 4%
+      (may need recalculation)
+    - Same Sign: Yes ✓
+    
+    **Result:** DETECTED (if OddsSpread passes)
+end note
+
+@enduml
+

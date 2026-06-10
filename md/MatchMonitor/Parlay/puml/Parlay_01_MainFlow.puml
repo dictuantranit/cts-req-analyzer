@@ -1,0 +1,143 @@
+@startuml Parlay_MainFlow
+!theme plain
+title Parlay Group Betting Detection - Main Flow
+
+' Define colors
+!define STAGE1_COLOR #E3F2FD
+!define STAGE2_COLOR #FFF9C4
+!define STAGE3_COLOR #C8E6C9
+!define STAGE4_COLOR #FFCCBC
+!define STAGE5_COLOR #F3E5F5
+!define STAGE6_COLOR #FCE4EC
+
+skinparam activity {
+    BackgroundColor<<Stage1>> STAGE1_COLOR
+    BackgroundColor<<Stage2>> STAGE2_COLOR
+    BackgroundColor<<Stage3>> STAGE3_COLOR
+    BackgroundColor<<Stage4>> STAGE4_COLOR
+    BackgroundColor<<Stage5>> STAGE5_COLOR
+    BackgroundColor<<Stage6>> STAGE6_COLOR
+}
+
+start
+
+:Job Triggered\n(Every 5 minutes)<<Stage1>>;
+
+partition "**Phase 1: Get Parlay Tickets from MainDB**" {
+    :Call SP: CTS_MatchMonitorParlay_GetNewTicket\n(SQL Server - bodb02)<<Stage1>>;
+    
+    :Read last scanned SequenceID<<Stage1>>;
+    
+    :Query bettrans for Parlay tickets\nWHERE Betteam = 1 (Mix Parlay)\nAND BetType = 29\nAND MatchID = 29\nAND (BetCheck & 2 = 2 OR BetCheck & 4 = 4)<<Stage1>>;
+    
+    note right
+        **Parlay Filters:**
+        - Mix Parlay only
+        - Combo 2 or Combo 3+
+        - Exclude internal accounts
+        - Exclude specific sites
+        - Exclude cashout accounts
+    end note
+    
+    :Get ticket details from bettransm\n(Multiple matches per Refno)<<Stage1>>;
+    
+    :Filter by Sport/BetType settings<<Stage1>>;
+    
+    :Return ticket list\n(SequenceID, TransID, Refno, TransIDm, ...)<<Stage1>>;
+}
+
+partition "**Phase 2: Insert into Staging Tables (MySQL)**" {
+    :Group tickets by Refno<<Stage2>>;
+    
+    :For each match in parlay:<<Stage2>>;
+    
+    :Calculate ScoreDiff\n= (LiveHomeScore * 10000) + LiveAwayScore<<Stage2>>;
+    
+    :Convert TransDate to TO_SECONDS<<Stage2>>;
+    
+    :INSERT INTO\nMatchMonitorParlayStagingGroupBetting[Live/NonLive]<<Stage2>>;
+    
+    :Update SystemParameter\nwith new SequenceID<<Stage2>>;
+}
+
+partition "**Phase 3: Get Matches to Process**" {
+    :Call SP: CTS_DC_MatchMonitorParlay_RuleGroupBetting_Get<<Stage3>>;
+    
+    :Read last processed SequenceID\nfrom SystemParameter<<Stage3>>;
+    note right
+        Live: ParameterID = 173
+        NonLive: ParameterID = 174
+    end note
+    
+    :Read rule TimeStep\n(180 seconds = 3 minutes)<<Stage3>>;
+    
+    :Load Temp_OldGroup\n(Existing groups still in staging)<<Stage3>>;
+    
+    :Calculate time window\nMaxTime = MinTransDate + TimeStep<<Stage3>>;
+    
+    :Query staging table\nWHERE SequenceID <= MaxSequenceID\nGROUP BY MatchID, ScoreDiff, BettypeID,\nBetID, Betteam, OldGroupID\nHAVING COUNT(DISTINCT CustID) > 1<<Stage3>>;
+    
+    :Return match groups\n(MatchID, CustIDList, CTSCustIDList, TransIDmList)<<Stage3>>;
+}
+
+if (Has matches to process?) then (yes)
+    partition "**Phase 4: Process Each Match (Parallel)**" {
+        fork
+            :Match 1<<Stage4>>;
+        fork again
+            :Match 2<<Stage4>>;
+        fork again
+            :Match N<<Stage4>>;
+        end fork
+        
+        :For each match:<<Stage4>>;
+        
+        note right
+            **Processing in parallel**
+            Number of threads: Configurable
+        end note
+        
+        :Round 1: Association Detection\nCall AssociationDetection service\nwith 4 criteria (Device, AI, IP, 3 Matches)<<Stage4>>;
+        
+        :Get association result:\n[{CustID: 123, GroupID: 1}, ...]<<Stage4>>;
+        
+        :Call SP: CTS_DC_MatchMonitorParlay_RuleGroupBetting_Process\nwith CustGroup JSON<<Stage4>>;
+        
+        :Inside Process SP:\n- Group tickets by TimeStep windows\n- Filter: Each group must have >1 customer\n- Return complete groups & reprocess groups<<Stage4>>;
+        
+        :Round 2: Reprocess unassigned tickets\nRe-run Association Detection\nfor GroupID = 0 tickets<<Stage4>>;
+    }
+    
+    partition "**Phase 5: Complete & Save**" {
+        :Call SP: CTS_DC_MatchMonitorParlay_RuleGroupBetting_Complete<<Stage5>>;
+        
+        :Merge groups by TransIDList\n(avoid duplicates)<<Stage5>>;
+        
+        if (Match exists in MatchMonitorDetails?) then (yes)
+            :Merge new tickets\nwith existing tickets (UNION)<<Stage5>>;
+            :UPDATE MatchMonitorDetails<<Stage5>>;
+        else (no)
+            :INSERT MatchMonitor<<Stage5>>;
+            :INSERT MatchMonitorDetails<<Stage5>>;
+        endif
+        
+        :UPDATE staging table\nSET GroupID for detected tickets<<Stage5>>;
+    }
+    
+    partition "**Phase 6: Clean Staging**" {
+        :Call SP: CTS_DC_MatchMonitorParlay_RuleGroupBetting_StagingClean<<Stage6>>;
+        
+        :DELETE FROM staging table\nWHERE SequenceID <= MaxSequenceID<<Stage6>>;
+        
+        :UPDATE SystemParameter\nSET ParameterValue = MaxSequenceID<<Stage6>>;
+    }
+else (no)
+    :No matches to process<<Stage6>>;
+endif
+
+:Job completed<<Stage6>>;
+
+stop
+
+@enduml
+

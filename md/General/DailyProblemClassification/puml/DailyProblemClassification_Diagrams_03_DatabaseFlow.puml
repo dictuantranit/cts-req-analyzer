@@ -1,0 +1,247 @@
+@startuml DailyProblemClassification_DatabaseFlow
+title Daily Problem Classification - Database Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam databaseBackgroundColor #E8F5E9
+skinparam databaseBorderColor #4CAF50
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+
+|DataAccess Layer|
+start
+
+:GetPADailyScanFromQueue();
+|CTS_DataCenter (MySQL)|
+:Execute SP: **CTS_DC_CustClassification_DailyScanPA_GetFromQueue**;
+note right
+  **Database**: CTS_DataCenter.ctsService
+  **Timeout**: 300 seconds (default)
+  
+  **Purpose**: Get PA customers from Daily Scan Queue
+  **Queue Source**: Populated by RealtimeClassification
+  
+  **Returns**:
+  - CustID (long)
+  - DWSportType (int) - Sport Group
+  
+  **Logic**:
+  - SELECT TOP 10000 FROM CTSCustomerClassification_DailyPAQueue
+  - ORDER BY InsertedTime ASC (FIFO)
+  - Get oldest PA customers first
+end note
+
+:Return PADailyScanFromQueueEntity[];
+|Service Layer|
+:Store PADailyScanFromQueueModel;
+
+|Service Layer|
+:GetProblemAccountLosingClassification();
+|bodb_VR2Model (SQL Server)|
+:Execute SP: **CTS_ProblemAccountsClassification_Daily**;
+note right
+  **Database**: bodb_VR2Model.wsv_cts
+  **Timeout**: 1200 seconds (20 minutes)
+  
+  **Purpose**: Calculate Problem Account Losing Classification
+  **Input**: CustID list from queue
+  
+  **Returns**: ProblemAccountLosingClassificationEntity[]
+  - CustID
+  - CategoryID (PA/PotentialPA)
+  - TurnoverRM (betting volume)
+  - WinlossRM (loss amount)
+  - BetCount (number of bets)
+  - ActiveDays (betting frequency)
+  - PerformanceTime (calculation period)
+  
+  **Calculation Logic**:
+  1. Get customer betting data
+  2. Calculate losing performance:
+     - Total turnover
+     - Total winloss (negative = loss)
+     - Total bet count
+     - Active betting days
+  3. Apply PA thresholds:
+     - High loss amount → PA
+     - Medium loss → PotentialPA
+  4. Determine PA category based on:
+     - Loss amount thresholds
+     - Turnover thresholds
+     - Activity frequency
+     - Performance period
+  5. Return classification results
+end note
+
+:Return ProblemAccountLosingClassificationEntity[];
+|Service Layer|
+:Chunk by batchSize;
+
+repeat
+  :Reset for batch;
+  
+  |DataAccess Layer|
+  :InsertProblemProbationClassification(JSON);
+  |CTS_DataCenter (MySQL)|
+  :Execute SP: **CTS_DC_CustClassification_ProblemAccountProbation_Insert**;
+  note right
+    **Database**: CTS_DataCenter.ctsServiceAdmin
+    **Timeout**: 300 seconds (default)
+    
+    **Purpose**: Insert PA Probation Classification
+    **Input**: @ip_ProblemAccount (JSON)
+    
+    **JSON Structure**:
+    {
+      "CustID": long,
+      "CategoryID": int,
+      "TurnoverRM": decimal,
+      "WinlossRM": decimal,
+      "BetCount": long,
+      "ActiveDays": int,
+      ...
+    }
+    
+    **Returns**: InsertPAProbationResult[]
+    - CTSCustID (long)
+    - CustID (long)
+    - IsRobot (bool) - Robot detection flag
+    
+    **Insert Logic**:
+    1. Parse JSON PA data
+    2. For each PA customer:
+       a. INSERT/UPDATE CTSCustomerClassification
+       b. Set CategoryID (PA/PotentialPA)
+       c. Set CategoryName
+       d. Set probation period
+       e. Set RelevantCategoryID
+       f. Detect if Robot (IsRobot flag)
+    3. Return inserted records with Robot flag
+    
+    **Robot Detection**:
+    - Based on betting patterns
+    - High frequency + high volume
+    - Suspicious activity markers
+    - Returns IsRobot = true/false
+  end note
+
+  :Return InsertPAProbationResult[];
+  |Service Layer|
+  :Store problemAccounts (CTSCustID, CustID, IsRobot);
+  
+  :Filter PA vs Robot (by IsRobot flag);
+  
+  fork
+    |Service Layer|
+    :InsertPALogics (Regular PA);
+    |Various DBs|
+    :Execute PA Logic SPs;
+    note right
+      **Purpose**: Insert PA detection logic
+      **Input**: Regular PA customers (IsRobot = false)
+      
+      **Logic Types**:
+      - PA winning pattern detection
+      - PA risk scoring
+      - PA behavior analysis
+      - PA monitoring rules
+      
+      **Multiple SPs executed**:
+      - Logic insertion
+      - Rule configuration
+      - Monitoring setup
+    end note
+  fork again
+    |Service Layer|
+    :InsertRobotLogics (Robot PA);
+    |Various DBs|
+    :Execute Robot Logic SPs;
+    note right
+      **Purpose**: Insert Robot detection logic
+      **Input**: Robot PA customers (IsRobot = true)
+      
+      **Logic Types**:
+      - Robot pattern detection
+      - Automated betting detection
+      - Bot behavior analysis
+      - Robot risk scoring
+      
+      **Separate logic for robots**:
+      - Different thresholds
+      - Different patterns
+      - Stricter monitoring
+    end note
+  end fork
+  
+  |Service Layer|
+  :PushCCToExternal (CustIDs);
+  |External - MainDB|
+  :Push Classification to MainDB;
+  note right
+    **Purpose**: Sync PA classification to MainDB
+    **Input**: Distinct CustIDs from problemAccounts
+    
+    **Parameters**:
+    - RoleGroup: Member
+    - ExternalBatchSize
+    - IsUpdateDangerToMainDB: true
+    
+    **Process**:
+    1. Get classification data by CustID
+    2. Format for external system
+    3. Push to MainDB API
+    4. Update external visibility
+    
+    **Batching**:
+    - Chunk by ExternalBatchSize
+    - Parallel push for efficiency
+    - Error handling per batch
+  end note
+  :Return success status;
+
+repeat while (More batches?) is (yes)
+-> no;
+
+|DataAccess Layer|
+:CompletePADailyScan(custIDs);
+|CTS_DataCenter (MySQL)|
+:Execute SP: **CTS_DC_CustClassification_DailyScanPA_Complete**;
+note right
+  **Database**: CTS_DataCenter.ctsServiceAdmin
+  **Timeout**: 300 seconds (default)
+  
+  **Purpose**: Mark PA queue as completed
+  **Input**: @CustIDs (comma-separated string)
+  
+  **Logic**:
+  1. Parse CustID list from string
+  2. DELETE FROM CTSCustomerClassification_DailyPAQueue
+     WHERE CustID IN (parsed list)
+  3. Remove processed customers from queue
+  
+  **Effect**:
+  - Clears processed customers from queue
+  - Prevents re-processing
+  - Enables FIFO for next batch
+end note
+
+|Service Layer|
+:Check if more customers in queue;
+if (More in queue?) then (yes)
+  :Return isContinue = true;
+  |JobService|
+  :Recursive call - JobRun();
+  note right
+    **Recursive Processing**:
+    Continue until queue is empty
+  end note
+  detach
+else (no)
+  :Return isContinue = false;
+  stop
+endif
+
+@enduml
+

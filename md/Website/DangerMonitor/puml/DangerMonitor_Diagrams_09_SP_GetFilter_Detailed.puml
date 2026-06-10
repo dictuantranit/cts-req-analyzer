@@ -1,0 +1,187 @@
+@startuml DangerMonitor_SP_GetFilter_Detailed
+!theme plain
+title CTS_MatchMonitor_Details_GetFilter - Detailed Database Flow
+
+skinparam component {
+    BackgroundColor lightblue
+    BorderColor darkblue
+}
+
+skinparam database {
+    BackgroundColor lightyellow
+    BorderColor orange
+}
+
+skinparam arrow {
+    Color darkgreen
+}
+
+package "SQL Server Database: bodb02 / WASAVerse" {
+    database "bettrans" as BetTrans
+    database "bettrans14" as BetTrans14
+    database "bettrans_bk" as BetTransBK
+    database "Match" as Match
+    database "match14" as Match14
+    database "match_bk" as MatchBK
+    database "Customer" as Customer
+    database "custInfo" as CustInfo
+    database "Exchange" as Exchange
+    database "Dep_CustSuper" as DepCustSuper
+    database "CustProductStatus" as CustProductStatus
+}
+
+component "CTS_MatchMonitor_Details_GetFilter" as SP {
+    note right
+        **Database:** bodb02/WASAVerse
+        **Purpose:** Get Filter Options for Detail Page
+        **ViewMode:**
+        - 0: All-MatchMonitor
+        - 1: Suspicious Only
+        - 2: All-Danger Monitor
+    end note
+}
+
+' Temp Tables
+package "Temp Tables (Internal)" {
+    component "#tmpTrans" as TmpTrans
+    component "#tmpSportBettype" as TmpSportBettype
+    component "#tmpSuspiciousTrans" as TmpSuspiciousTrans
+    component "#tmpSuspiciousDistinctTrans" as TmpSuspiciousDistinct
+    component "#tmpUsername" as TmpUsername
+    component "#tmpCustomer" as TmpCustomer
+    component "@tmpBUMBData" as TmpBUMBData
+}
+
+note right of TmpTrans
+    **Temp Table: #tmpTrans**
+    * TransId : BIGINT
+    * CustId : INT
+    * Hdp1, Hdp2 : SMALLMONEY
+    * LiveHomeScore, LiveAwayScore : SMALLINT
+    * BetTeam : NVARCHAR(10)
+    * CurrencyId : SMALLINT
+    * CurrencyName : NVARCHAR(100)
+    * Hdp : SMALLMONEY
+    * IsLicensee : BIT
+    * BetType : SMALLINT
+    * TicketStatus : SMALLINT
+    * Danger1-5 : TINYINT
+    * CustomerClass : SMALLINT
+    * SequenceId : BIGINT
+    * TransDate : DATETIME
+    * IsCashout : BIT
+end note
+
+note right of TmpSportBettype
+    **Temp Table: #tmpSportBettype**
+    * SportTypeID : SMALLINT
+    * BetTypeID : INT
+    * BetChoiceType : TINYINT
+    * BetIDPattern : NVARCHAR(20)
+    * BetID : BIGINT
+end note
+
+' Flow: Parse Input Parameters
+SP --> TmpBUMBData : **EXEC**\nAge_SelBalanceUpDay
+SP --> TmpBUMBData : **SELECT**\nGet BalanceUpDay, MoveBetsDay
+
+SP --> TmpUsername : **INSERT**\n(Parse @UserNameList)
+SP --> TmpCustomer : **INSERT**\n(Filter Customers by Username)
+
+SP --> TmpSportBettype : **INSERT**\n(Parse @ListSportBettype JSON)
+
+SP --> TmpSuspiciousTrans : **INSERT**\n(Parse @ListSuspiciousTransId JSON)
+SP --> TmpSuspiciousDistinct : **INSERT**\n(DISTINCT TransIds)
+
+' Flow: Determine Data Source
+SP --> SP : Check EventDate vs\nBalanceUpDay/MoveBetsDay
+note right of SP
+    **Data Source Logic:**
+    - EventDate < BalanceUpDay → Use bettrans_bk
+    - EventDate <= MoveBetsDay → Use bettrans14
+    - Otherwise → Use bettrans (Origin)
+end note
+
+' Flow: ViewMode = 1 (Suspicious Only)
+SP --> TmpTrans : **INSERT**\n(ViewMode = 1)
+TmpSuspiciousDistinct --> BetTrans : **JOIN**\nON TransId
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans : **JOIN**\nON SportType, BetType, BetID
+
+note right of BetTrans
+    **SELECT Operations (ViewMode=1):**
+    - Filter by @MatchID
+    - Filter by @IsLive
+    - Filter by @IsExclTestCurr
+    - Filter by @FromTransDate, @ToTransDate
+    - Filter by @UserNameList
+    - FROM bettrans (Origin)
+    - FROM bettrans14 (14 days)
+    - FROM bettrans_bk (Archive)
+    - WITH(NOLOCK)
+end note
+
+' Flow: ViewMode = 0 (All-MatchMonitor)
+SP --> TmpTrans : **INSERT**\n(ViewMode = 0)
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans : **JOIN**\nON SportType, BetType, BetID
+
+' Flow: ViewMode = 2 (All-Danger Monitor)
+SP --> TmpTrans : **INSERT**\n(ViewMode = 2)
+BetTrans --> Match : **JOIN**\nON MatchId
+BetTrans --> Customer : **JOIN**\nON CustId
+BetTrans --> Exchange : **JOIN**\nON Currency
+TmpSportBettype --> BetTrans : **JOIN**\nON SportType, BetType, BetID
+
+note right of Customer
+    **Filter Conditions (ViewMode=2):**
+    - Exclude sites: Nextbet, 9wickets, 9wsports
+    - Exclude username LIKE '%Cashout%'
+    - Exclude specific mrecommend IDs
+    - Exclude specific recommend IDs
+    - Exclude specific srecommend IDs
+end note
+
+' Flow: Enrich Data with Customer Info
+TmpTrans --> CustInfo : **JOIN**\nON CustId
+CustInfo --> DepCustSuper : **JOIN**\nON srecommend
+CustInfo --> CustProductStatus : **JOIN**\nON CustId
+
+SP --> TmpTrans : **UPDATE**\n(Enrich with Customer Data)
+note right of SP
+    **UPDATE Operations:**
+    - Set IsLicensee (from Dep_CustSuper)
+    - Set Danger1-5 (from custInfo)
+    - Set CustomerClass (from custInfo)
+end note
+
+' Flow: Return Filter Options
+SP --> TmpTrans : **SELECT DISTINCT**
+note right of SP
+    **Returns:**
+    - LiveHomeScore, LiveAwayScore
+    - IsLicensee
+    - CustomerClass
+    - Danger1, Danger2, Danger3, Danger4, Danger5
+    - CurrencyId, CurrencyName
+    - SuspiciousReason, SuspiciousGroupId
+    - Hdp, BetTeam
+    - TicketStatus
+    - IsCashout
+    **Output Parameters:**
+    - @MaxSequenceId
+    - @MaxTransDate
+    - @TotalTicketAll
+    - @TotalTicketLicensee
+    - @TotalTicketCredit
+end note
+
+' Cleanup
+SP --> TmpTrans : **DROP TABLE**
+SP --> TmpSportBettype : **DROP TABLE**
+SP --> TmpSuspiciousTrans : **DROP TABLE**
+
+@enduml
+

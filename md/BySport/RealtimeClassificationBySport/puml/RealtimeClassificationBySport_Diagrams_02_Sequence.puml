@@ -1,0 +1,186 @@
+@startuml RealtimeClassificationBySport_Sequence
+!theme plain
+title Realtime Classification By Sport - Sequence Diagram
+
+actor "Job Scheduler\n(External)" as Scheduler
+participant "ClassificationBySportJob\nController" as Controller
+participant "RealtimeClassificationBySport\nJobService" as JobService
+participant "RealtimeClassificationBySport\nService" as Service
+participant "RealtimeClassificationBySport\nDataAccess" as DataAccess
+database "SQL Server\nbodb_VR2Model" as VR2DB
+database "MySQL\nCTS_DataCenter" as DB
+
+Scheduler -> Controller: POST /api/classificationBySportJobs/ScanRealtimeClassificationBySport\nbatchInternalSize
+activate Controller
+
+Controller -> JobService: Execute(batchInternalSize)
+activate JobService
+
+JobService -> Service: Start()
+activate Service
+Service -> Service: Initialize customers and customerCategories models
+Service --> JobService: IRealtimeClassificationBySportServices
+deactivate Service
+
+JobService -> Service: GetNewPlaceBetCustomers()
+activate Service
+
+Service -> DataAccess: GetNewPlaceBetCustomers()
+activate DataAccess
+
+DataAccess -> DataAccess: Create GetChangeCustomerRealtimeBySportCriteria
+DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_RealTime_GetChanges\n@ScannedMaxId OUTPUT
+activate VR2DB
+note right of VR2DB
+    Stored Procedure:
+    - Get TOP 20000 from RealtimeChanges
+    - Order by ID ASC
+    - Return: CustID, SportGroup
+    - Output: ScannedMaxId (MAX ID)
+end note
+VR2DB --> DataAccess: ResultSet: CustClassificationRealtimeBySportEntity[]\nScannedMaxId
+deactivate VR2DB
+
+DataAccess --> Service: GetNewPlaceBetCustomerModel
+deactivate DataAccess
+
+Service --> JobService: GetNewPlaceBetCustomerModel
+deactivate Service
+
+alt Has Customers (CustomerNewPlaceBets.IsNotNullOrEmpty())
+    JobService -> Service: GetCustomerCategory(batchInternalSize)
+    activate Service
+    
+    Service -> Service: Chunk customers by batchInternalSize
+    
+    loop For each chunk
+        Service -> DataAccess: GetCustomerCategory(custInfoList)
+        activate DataAccess
+        
+        DataAccess -> DataAccess: Serialize customer batch to JSON
+        DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_Realtime_GetCategory\n@ip_CustInfoList (JSON)
+        activate DB
+        note right of DB
+            Stored Procedure:
+            - Parse JSON customer list
+            - Get current classification
+            - Categorize:
+              * NULL or Normal: ResultSet 1
+              * PA or PotentialPA: ResultSet 2
+        end note
+        DB --> DataAccess: ResultSet 1: CustomerNormals\nResultSet 2: CustomerPADailyScans
+        deactivate DB
+        
+        DataAccess --> Service: GetCustomerCategoryBySportModel
+        deactivate DataAccess
+        
+        Service -> Service: Add to customerCategories collections
+    end
+    
+    Service --> JobService: GetCustomerCategoryBySportModel
+    deactivate Service
+    
+    par Preprocess Normal Customers
+        JobService -> Service: PreprocessCustomerClassRealtime(batchInternalSize)
+        activate Service
+        
+        Service -> Service: Chunk CustomerNormals by batchInternalSize
+        
+        loop For each chunk
+            Service -> DataAccess: PreprocessCustomerClassRealtime(custBatch)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Convert to XML string
+            DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_RealTime_Preprocess(@CustomersXML)
+            activate VR2DB
+            note right of VR2DB
+                Stored Procedure:
+                - Parse XML customer list
+                - Get Priority from Priority table
+                - Call NormalPool_Insert
+                - Insert into Normal Pool
+            end note
+            VR2DB --> DataAccess: Success
+            deactivate VR2DB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+        end
+        
+        Service --> JobService: void
+        deactivate Service
+    else Insert PA Queue
+        JobService -> Service: InsertPADailyScanQueue(batchInternalSize)
+        activate Service
+        
+        Service -> Service: Chunk CustomerPADailyScans by batchInternalSize
+        
+        loop For each chunk
+            Service -> DataAccess: InsertPADailyScanQueue(custInfoList)
+            activate DataAccess
+            
+            DataAccess -> DataAccess: Serialize to JSON
+            DataAccess -> DB: EXEC CTS_DC_CustClassification_BySport_DailyScanPA_InsertToQueue(@ip_CustInfoList)
+            activate DB
+            note right of DB
+                Stored Procedure:
+                - Parse JSON customer list
+                - Insert into DailyPAQueue
+                - Set CreatedTime = NOW()
+            end note
+            DB --> DataAccess: Success
+            deactivate DB
+            
+            DataAccess --> Service: void
+            deactivate DataAccess
+        end
+        
+        Service --> JobService: void
+        deactivate Service
+    end
+    
+    JobService -> Service: CompleteCustomerRealtime()
+    activate Service
+    
+    Service -> DataAccess: CompleteCustomerRealtime(scannedMaxId)
+    activate DataAccess
+    
+    DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_RealTime_Complete\n@ScannedMaxId
+    activate VR2DB
+    note right of VR2DB
+        Stored Procedure:
+        - DELETE FROM RealtimeChanges
+        - WHERE ID <= @ScannedMaxId
+        - Mark processed records as completed
+    end note
+    VR2DB --> DataAccess: Success
+    deactivate VR2DB
+    
+    DataAccess --> Service: void
+    deactivate DataAccess
+    
+    Service --> JobService: void
+    deactivate Service
+else No Customers
+    JobService -> Service: CompleteCustomerRealtime()
+    activate Service
+    Service -> DataAccess: CompleteCustomerRealtime(0)
+    activate DataAccess
+    DataAccess -> VR2DB: EXEC CTS_BySportNormalClassification_RealTime_Complete\n@ScannedMaxId = 0
+    activate VR2DB
+    VR2DB --> DataAccess: Success (no records to delete)
+    deactivate VR2DB
+    DataAccess --> Service: void
+    deactivate DataAccess
+    Service --> JobService: void
+    deactivate Service
+end
+
+JobService --> Controller: Task<bool> (true/false)
+deactivate JobService
+
+Controller --> Scheduler: HTTP 200 OK\n{ success: true/false }
+deactivate Controller
+
+@enduml
+

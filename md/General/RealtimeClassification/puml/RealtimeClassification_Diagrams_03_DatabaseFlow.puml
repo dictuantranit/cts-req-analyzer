@@ -1,0 +1,165 @@
+@startuml RealtimeClassification_DatabaseFlow
+!theme plain
+title Realtime Classification - Database Flow
+
+start
+
+partition "Step 1: Get New Place Bet Customers" {
+  :Call SP: CTS_GeneralNormalClassification_RealTime_GetChanges;
+  note right
+      **Database**: bodb_VR2Model (SQL Server)
+      **Timeout**: 300 seconds
+      
+      **Output Parameters**:
+      - @ScannedMaxId (BIGINT, OUTPUT)
+  end note
+  
+  :Return ResultSet + ScannedMaxId;
+  note right
+      **ResultSet**:
+      - CustId (BIGINT)
+      - SportId (INT)
+      
+      **Max Records**: 20000 (TOP 20000)
+      **Ordering**: ID ASC
+  end note
+}
+
+partition "Step 2: Categorize Customers" {
+  if (Has Customers?) then (yes)
+    :Chunk customers into batches (batchInternalSize);
+    
+    repeat :For each batch
+      :Join CustIds to comma-separated string;
+      note right
+          Example: "123,456,789,1011,1213"
+      end note
+      
+      :Call SP: CTS_DC_CustClassification_Realtime_GetCategory;
+      note right
+          **Database**: CTS_DataCenter (MySQL)
+          **Timeout**: 300 seconds
+          
+          **Parameters**:
+          - @ip_CustIDs (VARCHAR): "123,456,789,..."
+      end note
+      
+      :Return 2 ResultSets;
+      note right
+          **ResultSet 1: CustomerCategory** (Normal customers)
+          - CustId (BIGINT)
+          
+          **ResultSet 2: CustomerPADailyScan** (PA customers)
+          - CustId (BIGINT)
+          
+          **Categorization Logic**:
+          - NULL or Normal (ParentID = CONST_PARENTID_NORMAL)
+            → CustomerCategory
+          - PA or PotentialPA (ParentID IN PA/PotentialPA)
+            AND RelevantCategoryID IS NOT NULL
+            → CustomerPADailyScan
+      end note
+      
+      :Collect to customerCategories;
+    repeat while (More batches?)
+  else (no)
+    :Skip categorization;
+  endif
+}
+
+partition "Step 3: Parallel Processing" {
+  split
+    :Process Normal Customers;
+    
+    if (Has Normal Customers?) then (yes)
+      :Chunk CustomerCategory by batchInternalSize;
+      
+      repeat :For each batch
+        :Join CustIds to comma-separated string;
+        
+        :Call SP: CTS_GeneralNormalClassification_Realtime_Preprocess;
+        note right
+            **Database**: bodb_VR2Model (SQL Server)
+            **Timeout**: 300 seconds
+            
+            **Parameters**:
+            - @ListCustId (VARCHAR): "123,456,..."
+            
+            **Logic**:
+            - Parse customer ID list
+            - Get Priority from CustomerClassification_Priority
+              * GroupId = 1
+              * FunctionId = 1 (Realtime)
+            - Call CTS_GeneralNormalClassification_NormalPool_Insert
+            - INSERT INTO Normal Pool with Priority
+        end note
+      repeat while (More batches?)
+    else (no)
+      :Skip;
+    endif
+  split again
+    :Process PA Customers;
+    
+    if (Has PA Customers?) then (yes)
+      :Chunk CustomerPADailyScan by batchInternalSize;
+      
+      repeat :For each batch
+        :Join CustIds to comma-separated string;
+        
+        :Call SP: CTS_DC_CustClassification_DailyScanPA_InsertToQueue;
+        note right
+            **Database**: CTS_DataCenter (MySQL)
+            **Timeout**: 300 seconds
+            
+            **Parameters**:
+            - @ip_CustIDs (VARCHAR): "123,456,..."
+            
+            **Logic**:
+            - Parse customer ID list
+            - INSERT INTO CTSCustomerClassification_DailyPAQueue
+              * CustId
+              * CreatedTime = NOW()
+            - Queue for DailyProblemClassification job
+        end note
+      repeat while (More batches?)
+    else (no)
+      :Skip;
+    endif
+  end split
+}
+
+partition "Step 4: Complete Processing" {
+  :Call SP: CTS_GeneralNormalClassification_RealTime_Complete;
+  note right
+      **Database**: bodb_VR2Model (SQL Server)
+      **Timeout**: 300 seconds
+      
+      **Parameters**:
+      - @ScannedMaxId (BIGINT)
+      
+      **Logic**:
+      - DELETE FROM CustomerClassification_RealtimeChanges
+      - WHERE ID <= @ScannedMaxId
+      
+      **Purpose**:
+      - Remove processed records
+      - Prevent duplicate processing
+      - Clean up RealtimeChanges table
+  end note
+}
+
+:Complete;
+note right
+  **Key Points**:
+  1. **2 Databases**: VR2 (SQL Server) + DataCenter (MySQL)
+  2. **Batch Processing**: Prevents memory overflow
+  3. **Parallel Execution**: Normal and PA paths run concurrently
+  4. **TOP 20000 Limit**: Incremental processing
+  5. **Dual Routing**: Normal → Normal Pool, PA → PA Queue
+  6. **ScannedMaxId**: Tracks completion for cleanup
+end note
+
+stop
+
+@enduml
+

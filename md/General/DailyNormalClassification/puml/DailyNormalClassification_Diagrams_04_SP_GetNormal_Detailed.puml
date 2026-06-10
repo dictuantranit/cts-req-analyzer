@@ -1,0 +1,207 @@
+@startuml DailyNormalClassification_SP_GetNormal_Detailed
+!theme plain
+title Stored Procedure: CTS_DC_CustClassification_DailyScan_GetNormal - Detailed Flow
+
+card "**SP: CTS_DC_CustClassification_DailyScan_GetNormal**" as SP {
+  rectangle "**Database**: CTS_DataCenter (MySQL)" as DB
+  rectangle "**Timeout**: Standard (300s)" as Timeout
+}
+
+start
+
+partition "Input/Output Parameters" {
+  :Declare OUTPUT parameters;
+  note right
+      @op_LastCategoryID INT OUTPUT
+      @op_LastCustID BIGINT OUTPUT
+      
+      Purpose: Track scanning position
+      for next execution
+  end note
+}
+
+partition "Read Current Position from SystemParameter" {
+  :Read LastCategoryID (ParameterID = 85);
+  note right
+      SELECT ParameterValue
+      INTO @LastCategoryID
+      FROM SystemParameter
+      WHERE ParameterID = 85;
+      
+      DailyNormalClassificationLastCategoryID
+  end note
+  
+  :Read LastCustID (ParameterID = 86);
+  note right
+      SELECT ParameterValue
+      INTO @LastCustID
+      FROM SystemParameter
+      WHERE ParameterID = 86;
+      
+      DailyNormalClassificationLastCustID
+  end note
+}
+
+partition "Find Next Category to Scan" {
+  :Get category list with scan intervals;
+  note right
+      SELECT 
+        CategoryID,
+        ScanIntervalInSecond
+      FROM CustomerCategory
+      WHERE ParentID = CONST_NORMAL_PARENT_ID
+        AND IsActive = 1
+      ORDER BY CategoryID;
+      
+      **Example Categories**:
+      - Normal Platinum: Interval = 3600 (1 hour)
+      - Normal Gold: Interval = 7200 (2 hours)
+      - Normal Silver: Interval = 14400 (4 hours)
+      - Normal Bronze: Interval = 28800 (8 hours)
+  end note
+  
+  :Find next category due for scan;
+  note right
+      Logic:
+      1. Start from LastCategoryID
+      2. Find category where:
+         - CategoryID >= LastCategoryID
+         - LastScannedTime + ScanInterval <= NOW()
+      3. If found: Use that category
+      4. If not found: Wrap to first category
+      
+      **Wraparound Example**:
+      If LastCategoryID = 5 (last category)
+      → Reset to CategoryID = 1 (first category)
+      → Start new daily cycle
+  end note
+  
+  :Set @SelectedCategoryID;
+}
+
+partition "Get Customers from Selected Category" {
+  :Query customers for scanning;
+  note right
+      SELECT 
+        cc.CustId
+      INTO #tmpCustomers
+      FROM CTSCustomerClassification cc
+      WHERE cc.CategoryID = @SelectedCategoryID
+        AND cc.CustId > @LastCustID
+        AND (
+          cc.LastScannedDate IS NULL
+          OR TIMESTAMPDIFF(SECOND, cc.LastScannedDate, NOW())
+             >= @ScanIntervalInSecond
+        )
+        AND cc.IsActive = 1
+      ORDER BY cc.CustId ASC
+      LIMIT @BatchSize;
+      
+      **Filters**:
+      1. **CategoryID**: Current category being scanned
+      2. **CustId > LastCustID**: Incremental within category
+      3. **LastScannedDate**: Due for scan (or never scanned)
+      4. **IsActive**: Only active customers
+      5. **Ordering**: CustId ASC for sequential processing
+      6. **Limit**: Batch size (e.g., 10000)
+  end note
+  
+  :Filter by recent activity (optional);
+  note right
+      -- Additional filter: Has recent transactions
+      DELETE FROM #tmpCustomers
+      WHERE CustId NOT IN (
+        SELECT DISTINCT CustId
+        FROM BettingTransactions
+        WHERE TransDate >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      );
+      
+      **Purpose**: Only scan active bettors
+  end note
+}
+
+partition "Calculate Output Parameters" {
+  if (Has customers in #tmpCustomers?) then (yes)
+    :Calculate op_LastCustID;
+    note right
+        SELECT @op_LastCustID = MAX(CustId)
+        FROM #tmpCustomers;
+        
+        This is the last customer in batch
+        Next execution starts from this point
+    end note
+    
+    :Set op_LastCategoryID;
+    note right
+        SET @op_LastCategoryID = @SelectedCategoryID;
+        
+        Stay in current category
+    end note
+  else (no - category complete)
+    :Move to next category;
+    note right
+        SET @op_LastCustID = 0;
+        SET @op_LastCategoryID = @NextCategoryID;
+        
+        **Reset CustID** to 0 for new category
+        **Advance** to next category
+        
+        If @NextCategoryID is NULL (no more categories):
+        → Wrap to first category
+        → SET @op_LastCategoryID = @FirstCategoryID;
+    end note
+  endif
+}
+
+partition "Return Result Set" {
+  :Prepare result set;
+  note right
+      SELECT CustId
+      FROM #tmpCustomers
+      ORDER BY CustId;
+      
+      Returns list of customer IDs to process
+  end note
+  
+  :Return ResultSet + OUTPUT parameters;
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TEMPORARY TABLE IF EXISTS #tmpCustomers;
+  end note
+}
+
+stop
+
+note bottom
+  **Key Logic**:
+  1. Read scanning position from SystemParameter
+  2. Find next category due for scan (based on interval)
+  3. Get customers incrementally (CustId > LastCustID)
+  4. Filter by LastScannedDate and activity
+  5. Return customers + new position for next scan
+  6. Wraparound when all categories scanned
+  
+  **Incremental Scanning Benefits**:
+  - Resumable on failure
+  - No duplicate processing
+  - Manageable batch sizes
+  - Even distribution across categories
+  
+  **Scan Interval Logic**:
+  - Each category has own interval
+  - High-risk: Short interval (more frequent)
+  - Low-risk: Long interval (less frequent)
+  - Optimizes scanning frequency
+  
+  **Tables Accessed**:
+  - SystemParameter (READ)
+  - CustomerCategory (READ)
+  - CTSCustomerClassification (READ)
+  - BettingTransactions (READ - optional filter)
+end note
+
+@enduml
+

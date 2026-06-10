@@ -1,0 +1,296 @@
+@startuml SabaGroupBetting_MappingDictionary
+!theme plain
+title Match Monitor Saba Group Betting - CustID Mapping Dictionary Logic (Updated 2025-11-19)
+
+start
+
+:THE PROBLEM: ID Mismatch;
+
+note left
+    **Saba Platform:**
+    Saba uses its own Customer ID system
+    
+    Example Saba CustIDs:
+    - 101, 102, 103, 104, 105
+    
+    These are different from CTS internal IDs
+end note
+
+note right
+    **CTS System:**
+    CTS uses CTSCustID internally
+    
+    Example CTSCustIDs:
+    - 5001, 5002, 5003, 5004, 5005
+    
+    These are CTS's internal customer identifiers
+    
+    **Problem:**
+    Saba CustID (101) ≠ CTS CTSCustID (5001)
+    
+    **Impact:**
+    - Association detection needs CTSCustID
+    - But Saba transactions have Saba CustID
+    - Need mapping to bridge the gap
+end note
+
+:THE SOLUTION: MappingCustDictionary;
+
+note right
+    **Type:** IReadOnlyDictionary<int, int>
+    **Key:** Saba CustID (int)
+    **Value:** CTS CTSCustID (int)
+    
+    **Example:**
+    {
+        101: 5001,
+        102: 5002,
+        103: 5003,
+        104: 5004,
+        105: 5005
+    }
+    
+    **Purpose:**
+    Bridge between Saba and CTS customer IDs
+end note
+
+partition "CREATION PROCESS" {
+    :Call SP: CTS_DC_MatchMonitor_RuleGroupBettingSaba_Get;
+    
+    :SP Returns CTSCustomerList;
+    note right
+        Example CTSCustomerList:
+        [
+            { CustID: 101, CTSCustID: 5001 },
+            { CustID: 102, CTSCustID: 5002 },
+            { CustID: 103, CTSCustID: 5003 },
+            { CustID: 104, CTSCustID: 5004 },
+            { CustID: 105, CTSCustID: 5005 }
+        ]
+        
+        **SQL Query in SP:**
+        SELECT DISTINCT CustID, CTSCustID
+        FROM MatchMonitorStagingGroupBettingSabaLive
+        WHERE SequenceID <= @op_MaxSequenceID;
+        
+        **Tables:**
+        - MatchMonitorStagingGroupBettingSabaLive
+        - MatchMonitorStagingGroupBettingSabaNonLive
+    end note
+    
+    :Extract CustID and CTSCustID;
+    note right
+        var customerPairs = CTSCustomerList
+            .Select(x => new { 
+                x.CustID,      // Saba ID
+                x.CTSCustID    // CTS internal ID
+            })
+            .Distinct();
+    end note
+    
+    :Create Dictionary;
+    note right
+        **C# Code:**
+        
+        MappingCustDictionary = customerPairs
+            .ToDictionary(
+                x => x.CustID,      // Key: Saba CustID
+                x => x.CTSCustID    // Value: CTS CTSCustID
+            );
+        
+        **Type:**
+        IReadOnlyDictionary<int, int>
+        
+        **Read-Only:**
+        Ensures dictionary is not modified during processing
+    end note
+    
+    :Dictionary Ready;
+}
+
+partition "USAGE IN ASSOCIATION DETECTION" {
+    :Get Customer Lists from Match;
+    note right
+        From staging data:
+        - CustIDList: "101,102,103,104,105"
+        - CTSCustIDList: "5001,5002,5003,5004,5005"
+    end note
+    
+    :Create DetectAssociationParamModel;
+    note right
+        **C# Code:**
+        
+        var param = new DetectAssociationParamModel
+        {
+            CTSCustIds = ctsCustIDList,        // "5001,5002,5003,5004,5005"
+            CustIds = custIDList,              // "101,102,103,104,105"
+            IsDevice = true,
+            IsAI = true,
+            IsIP = true,
+            Is3MatchesLast7Days = true,
+            MappingCustDictionary = MappingCustDictionary  (**KEY!**)
+        };
+    end note
+    
+    :Call AssociationDetectionService;
+    note right
+        _assDetectService.DetectAssociation(param)
+    end note
+    
+    partition "Inside Detection Service" {
+        :Parse Customer IDs;
+        
+        :For each CustID, lookup CTSCustID;
+        note right
+            **Mapping Logic:**
+            
+            foreach (var custId in custIdList)
+            {
+                if (MappingCustDictionary.ContainsKey(custId))
+                {
+                    var ctsCustId = MappingCustDictionary[custId];
+                    // Use ctsCustId for queries
+                }
+            }
+            
+            **Example:**
+            CustID 101 -> Lookup -> CTSCustID 5001
+            CustID 102 -> Lookup -> CTSCustID 5002
+            etc.
+        end note
+        
+        :Query Association Tables with CTSCustID;
+        note right
+            SELECT * FROM CTSAssociationGroup
+            WHERE CTSCustID IN (5001, 5002, 5003, 5004, 5005)
+            
+            Uses mapped CTSCustID for internal queries
+        end note
+        
+        :Return Association Results;
+        note right
+            Results use CTSCustID:
+            [
+                { CTSCustID: 5001, GroupID: 1, Type: "Device" },
+                { CTSCustID: 5002, GroupID: 1, Type: "Device" },
+                { CTSCustID: 5003, GroupID: 1, Type: "Device" },
+                { CTSCustID: 5004, GroupID: 2, Type: "IP" },
+                { CTSCustID: 5005, GroupID: 2, Type: "IP" }
+            ]
+        end note
+    }
+    
+    :Map Back to Saba CustID;
+    note right
+        Reverse mapping for final results:
+        CTSCustID -> CustID
+        
+        5001 -> 101
+        5002 -> 102
+        etc.
+    end note
+    
+    :Return to Process Service;
+}
+
+partition "EXAMPLE SCENARIO" {
+    :Example: 3 Saba customers betting together;
+    
+    note right
+        **Match:** Liverpool vs Man City
+        **Saba Customers:**
+        - Saba CustID 101 (mapped to CTS 5001)
+        - Saba CustID 102 (mapped to CTS 5002)
+        - Saba CustID 103 (mapped to CTS 5003)
+        
+        **All bet:** Liverpool -0.5 @ Odds 1.95
+        **Same:** DeviceID = "ABC123"
+    end note
+    
+    :Step 1: Staging;
+    note right
+        INSERT INTO MatchMonitorStagingGroupBettingSabaLive
+        (CustID, CTSCustID, DeviceID, ...)
+        VALUES
+        (101, 5001, 'ABC123', ...),
+        (102, 5002, 'ABC123', ...),
+        (103, 5003, 'ABC123', ...)
+    end note
+    
+    :Step 2: Create Mapping;
+    note right
+        MappingCustDictionary = {
+            101: 5001,
+            102: 5002,
+            103: 5003
+        }
+    end note
+    
+    :Step 3: Association Detection;
+    note right
+        Input CTSCustIDs: [5001, 5002, 5003]
+        
+        Query:
+        SELECT * FROM CTSAssociationGroup
+        WHERE CTSCustID IN (5001, 5002, 5003)
+            AND DeviceID = 'ABC123'
+        
+        Result: All 3 customers -> GroupID = 1 (Device)
+    end note
+    
+    :Step 4: Save Results;
+    note right
+        INSERT INTO MatchMonitorDetails
+        (MatchID, GroupID, ListCustID, Reason, ...)
+        VALUES
+        (987654, 1, '101,102,103', 0, ...)
+        
+        **Reason = 0 (CONST_MMREASON_GROUPBETTINGSABA)**
+        **Uses Saba CustIDs in final results!**
+    end note
+}
+
+stop
+
+floating note right
+    ===========================================================
+    MAPPING DICTIONARY SUMMARY
+    ===========================================================
+    
+    **Why Needed:**
+    - Saba uses different customer ID system
+    - CTS internal queries require CTSCustID
+    - Mapping bridges the gap
+    
+    **How Created:**
+    - From SP result (CTSCustomerList)
+    - Dictionary<SabaCustID, CTSCustID>
+    - One-time creation per job run
+    
+    **Where Used:**
+    - Association detection service
+    - Internal CTS queries
+    - Group detection logic
+    
+    **Benefits:**
+    - Seamless integration between Saba and CTS
+    - No changes to core detection logic
+    - Maintainable and testable
+    
+    **Performance:**
+    - Dictionary lookup: O(1)
+    - Minimal overhead
+    - Created once, used many times
+    
+    **Type Safety:**
+    - IReadOnlyDictionary<int, int>
+    - Cannot be modified after creation
+    - Thread-safe for parallel processing
+    
+    **Tables:**
+    - MatchMonitorStagingGroupBettingSabaLive
+    - MatchMonitorStagingGroupBettingSabaNonLive
+    - MatchMonitorDetails (Reason=0)
+end note
+
+@enduml

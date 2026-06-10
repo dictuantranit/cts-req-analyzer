@@ -1,0 +1,182 @@
+@startuml NormalAccountInsert_ParallelTasks
+!theme plain
+title Normal Account Insert - 4 Parallel Tasks After Insert
+
+start
+
+:InsertNormalAccount Successful;
+note right
+    Classification + Tagging
+    inserted to database
+end note
+
+:Get successful CustIDs;
+
+partition "Parallel.Invoke() - 4 Concurrent Tasks" {
+  
+  split
+    :Task 1: PushCCToExternal;
+    note right
+        **Service**: CustClassToMainDBService
+        **Method**: PushExternalPackageByCustId
+        
+        **Parameters**:
+        - custIDs
+        - RoleGroup = Member
+        - ExternalBatchSize
+        - IsUpdateDangerToMainDB = true
+        - IsWriteLog
+        - ServiceName
+        
+        **Purpose**:
+        Push classification to MainDB
+        Make visible to external systems
+    end note
+    
+    :Batch push by ExternalBatchSize;
+    
+    repeat :For each external batch
+      :Call external API/SP;
+      :Update MainDB classification;
+    repeat while (More batches?)
+    
+    if (Push successful?) then (yes)
+      :Mark task success;
+    else (no)
+      :Add to failedThreads;
+      note right
+          Failed push will cause
+          batch to be retried
+      end note
+    endif
+    
+  split again
+    :Task 2: CompleteSpecialLicSubClassification;
+    note right
+        **Service**: TWClassificationService
+        **Method**: CompleteSpecialLicSubClassification
+        
+        **Purpose**:
+        Complete Special Licensee Sub-type
+        classification for TW customers
+    end note
+    
+    :Filter customers where ScanSpecialLicSubType = 1;
+    
+    if (Has Special LicSub customers?) then (yes)
+      :Create classification models;
+      note right
+          For each customer:
+          - CustID
+          - CategoryID (if successful)
+          - null (if failed in this batch)
+      end note
+      
+      :Serialize to JSON;
+      :Call TWClassificationService.CompleteSpecialLicSubClassification;
+      
+      :Update TW Special LicSub status;
+    else (no)
+      :Skip;
+    endif
+    
+  split again
+    :Task 3: PreprocessDangerousAssociation;
+    note right
+        **Service**: NormalDangerousAssociationCheckService
+        **Method**: PreprocessDangerousAssociation
+        
+        **Purpose**:
+        Queue customers for dangerous
+        association scanning
+    end note
+    
+    :Filter customers where IsScanDgrAssociation = true;
+    
+    if (Has customers to scan?) then (yes)
+      :Create preprocessing models;
+      note right
+          For each customer:
+          - CTSCustID
+          - DCSDeviceID = null
+      end note
+      
+      :Call PreprocessDangerousAssociation;
+      
+      :Insert to preprocessing queue;
+      note right
+          Will be processed by
+          NormalDangerousAssociationScan job
+      end note
+    else (no)
+      :Skip;
+    endif
+    
+  split again
+    :Task 4: DeleteAFCAccounts;
+    note right
+        **Service**: AntiFraudCenterServices
+        **Method**: DeleteAFCAccounts
+        
+        **Purpose**:
+        Remove customers from AFC monitoring
+        (Now classified as Normal)
+    end note
+    
+    :Call DeleteAFCAccounts;
+    note right
+        Parameters:
+        - custIDs
+        - FromFlow = CTSServices
+        - IsSyncAFCData (config)
+        - AFCDeleteAccountURL (config)
+        
+        Remove from Anti-Fraud Center
+        if now classified as Normal
+    end note
+    
+    if (IsSyncAFCData enabled?) then (yes)
+      :Call AFC API to delete accounts;
+      :Remove from AFC monitoring;
+    else (no)
+      :Skip AFC sync;
+    endif
+    
+  end split
+}
+
+:Check all task results;
+
+if (Any task failed?) then (yes)
+  :Add failure to failedThreads;
+  note right
+      Entire batch will NOT be
+      marked as completed
+  end note
+else (no)
+  :All tasks successful;
+endif
+
+note right
+  **Parallel Execution Benefits**:
+  - Reduces total processing time
+  - Independent tasks (no dependencies)
+  - Failed task doesn't block others
+  - All tasks must succeed for batch completion
+  
+  **Task Dependencies**:
+  - Task 1: Critical (MainDB sync)
+  - Task 2: Optional (TW specific)
+  - Task 3: Optional (Dangerous association)
+  - Task 4: Optional (AFC sync)
+  
+  **Failure Handling**:
+  - Any task failure → batch NOT marked complete
+  - Failed batch will be retried in next execution
+  - Prevents data inconsistency
+end note
+
+stop
+
+@enduml
+

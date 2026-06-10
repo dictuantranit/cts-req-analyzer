@@ -1,0 +1,144 @@
+@startuml RealtimeCheckChangeClassification_SP_UpdateLastTrans_Detailed
+!theme plain
+title Stored Procedure: CTS_Arc_CustomerAssociation_LastTicketDate_Update - Detailed Flow
+
+card "**SP: CTS_Arc_CustomerAssociation_LastTicketDate_Update**" as SP {
+  rectangle "**Database**: CTS_Archive (MySQL)" as DB
+  rectangle "**Schema**: CTS_Archive.ctsServiceAdmin" as Schema
+}
+
+start
+
+partition "Input Parameters" {
+  :Receive @ip_CustInfo (JSON);
+  note right
+      Parameter: @ip_CustInfo (TEXT/JSON)
+      
+      JSON Format:
+      [
+        {
+          "CustId": 123,
+          "LastTicketDate": "2024-01-01 10:30:00"
+        },
+        {
+          "CustId": 456,
+          "LastTicketDate": "2024-01-01 11:45:00"
+        },
+        ...
+      ]
+      
+      Purpose: Batch update multiple customers
+  end note
+}
+
+partition "Parse JSON Data" {
+  :Create temporary table;
+  note right
+      CREATE TEMPORARY TABLE Temp_CustInfo (
+        CustId INT,
+        LastTicketDate DATETIME
+      );
+  end note
+  
+  :Parse JSON array;
+  note right
+      MySQL JSON Functions:
+      - JSON_TABLE()
+      - JSON_EXTRACT()
+      - JSON_UNQUOTE()
+      
+      INSERT INTO Temp_CustInfo
+      SELECT 
+        JSON_EXTRACT(item, '$.CustId') AS CustId,
+        JSON_EXTRACT(item, '$.LastTicketDate') AS LastTicketDate
+      FROM JSON_TABLE(@ip_CustInfo, '$[*]' COLUMNS(...))
+  end note
+  
+  :Validate parsed data;
+  note right
+      - Check for NULL values
+      - Validate date format
+      - Ensure CustId exists
+  end note
+}
+
+partition "Update CustomerAssociation Table" {
+  :Execute batch UPDATE;
+  note right
+      UPDATE CustomerAssociation AS ca
+      INNER JOIN Temp_CustInfo AS tc
+        ON ca.CustId = tc.CustId
+      SET ca.LastTicketDate = tc.LastTicketDate
+      WHERE tc.LastTicketDate IS NOT NULL;
+      
+      Purpose:
+      - Track last betting activity
+      - Used for Customer Association analysis
+      - Important for fraud detection
+  end note
+  
+  :Get affected row count;
+  note right
+      SELECT ROW_COUNT() AS UpdatedCount;
+      
+      For logging and monitoring
+  end note
+}
+
+partition "Handle Missing Customers (Optional)" {
+  if (Insert if not exists?) then (yes)
+    :Insert new records;
+    note right
+        INSERT INTO CustomerAssociation
+          (CustId, LastTicketDate, CreatedDate)
+        SELECT 
+          tc.CustId,
+          tc.LastTicketDate,
+          NOW()
+        FROM Temp_CustInfo AS tc
+        LEFT JOIN CustomerAssociation AS ca
+          ON tc.CustId = ca.CustId
+        WHERE ca.CustId IS NULL;
+    end note
+  else (no)
+    :Skip insertion;
+  endif
+}
+
+partition "Cleanup" {
+  :Drop temporary table;
+  note right
+      DROP TEMPORARY TABLE IF EXISTS Temp_CustInfo;
+  end note
+  
+  :Log operation (optional);
+  note right
+      INSERT INTO OperationLog
+      VALUES (NOW(), 'UpdateLastTicketDate', UpdatedCount);
+  end note
+}
+
+:Return success;
+note right
+  **Key Logic**:
+  1. Parse JSON array into temp table
+  2. Batch UPDATE via JOIN
+  3. Optionally INSERT missing customers
+  4. Track operation for monitoring
+  
+  **Tables Accessed**:
+  - CustomerAssociation (MAIN TABLE)
+    * CustId (PK)
+    * LastTicketDate (Updated)
+    * Other association fields...
+  
+  **Performance**:
+  - Single UPDATE with JOIN (efficient)
+  - Temporary table for batch processing
+  - Index on CustId for fast lookup
+end note
+
+stop
+
+@enduml
+

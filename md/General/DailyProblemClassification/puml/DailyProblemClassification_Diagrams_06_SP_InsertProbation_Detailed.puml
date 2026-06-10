@@ -1,0 +1,281 @@
+@startuml DailyProblemClassification_SP_InsertProbation
+title CTS_DC_CustClassification_ProblemAccountProbation_Insert - Detailed Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E1F5FE
+skinparam activityBorderColor #0277BD
+
+start
+
+:Stored Procedure Called;
+note right
+  **SP Name**: CTS_DC_CustClassification_ProblemAccountProbation_Insert
+  **Database**: CTS_DataCenter.ctsServiceAdmin (MySQL)
+  **Timeout**: 300 seconds (default)
+  **Parameters**: @ip_ProblemAccount (JSON)
+  **Called From**: ProblemAccountProbationInsertCriteria
+end note
+
+:Receive JSON Input;
+note right
+  **Input Parameter**: @ip_ProblemAccount (JSON string)
+  
+  **JSON Structure**:
+  [
+    {
+      "CustID": 123456,
+      "CategoryID": 5,  // PA or PotentialPA
+      "TurnoverRM": 75000.50,
+      "WinlossRM": -15000.00,  // Negative = loss
+      "BetCount": 250,
+      "ActiveDays": 20,
+      "PerformanceTime": "2025-11-18",
+      "CategoryName": "PA",
+      ...
+    },
+    ...
+  ]
+  
+  **Array**: Multiple customers in single call
+end note
+
+:Parse JSON to table;
+note right
+  **JSON Parsing**:
+  - MySQL: JSON_TABLE function
+  - Convert JSON array to rows
+  - Extract each field
+  - Type conversion (string → numeric)
+end note
+
+:Create temp table #ProblemAccounts;
+note right
+  **Temp Table Columns**:
+  - CustID
+  - CategoryID
+  - CategoryName
+  - TurnoverRM
+  - WinlossRM
+  - BetCount
+  - ActiveDays
+  - PerformanceTime
+  - Other PA metrics
+end note
+
+partition "Process Each Customer" {
+  repeat
+    :Get next customer from temp table;
+    
+    :Check if customer exists in CTSCustomerClassification;
+    
+    if (Customer exists?) then (yes)
+      :UPDATE CTSCustomerClassification;
+      note right
+        **Update Existing Record**:
+        - Set CategoryID = PA/PotentialPA
+        - Set CategoryName
+        - Update TurnoverRM
+        - Update WinlossRM
+        - Update BetCount
+        - Update ActiveDays
+        - Set ProbationStartDate = NOW()
+        - Set ProbationEndDate = NOW() + X days
+        - Set RelevantCategoryID (for monitoring)
+        - Set UpdatedDate = NOW()
+        - Keep existing CTSCustID
+        
+        **WHERE**: CustID = current customer
+      end note
+    else (no)
+      :INSERT INTO CTSCustomerClassification;
+      note right
+        **Insert New Record**:
+        - Generate new CTSCustID (auto-increment)
+        - Set CustID
+        - Set CategoryID = PA/PotentialPA
+        - Set CategoryName
+        - Set TurnoverRM
+        - Set WinlossRM
+        - Set BetCount
+        - Set ActiveDays
+        - Set ProbationStartDate = NOW()
+        - Set ProbationEndDate = NOW() + X days
+        - Set RelevantCategoryID
+        - Set InsertedDate = NOW()
+        - Set UpdatedDate = NOW()
+      end note
+    endif
+
+    :Set Probation Period;
+    note right
+      **Probation Period**:
+      - Start: Current date
+      - End: Start + X days (e.g., 30 days)
+      - Duration depends on PA severity
+      
+      **PA**: 30 days
+      **PotentialPA**: 15 days
+      
+      **Purpose**:
+      - Monitor customer behavior
+      - Observe betting pattern changes
+      - Review at end of probation
+    end note
+
+    :Detect if Robot;
+    note right
+      **Robot Detection Logic**:
+      Based on betting patterns and behavior
+      
+      **Robot Indicators**:
+      1. **High Frequency**:
+         - BetCount > threshold (e.g., > 500/day)
+         - Very short time between bets (< 10 seconds)
+         
+      2. **Consistent Patterns**:
+         - Same bet amounts repeatedly
+         - Regular time intervals
+         - Predictable behavior
+         
+      3. **Suspicious Activity**:
+         - API-based betting (not web UI)
+         - Multiple simultaneous bets
+         - Instant bet placement after odds change
+         
+      4. **Historical Data**:
+         - Previously flagged as robot
+         - Similar to known robot patterns
+         - Machine learning detection
+      
+      **Detection Methods**:
+      - Pattern analysis
+      - ML model scoring
+      - Rule-based detection
+      - Historical comparison
+    end note
+
+    if (Is Robot?) then (yes)
+      :Set IsRobot = true;
+      note right
+        **Robot PA Customer**:
+        - Different handling
+        - Stricter monitoring
+        - Separate logic insertion
+        - Higher risk score
+      end note
+    else (no)
+      :Set IsRobot = false;
+      note right
+        **Regular PA Customer**:
+        - Normal PA handling
+        - Standard monitoring
+        - Regular logic insertion
+        - Normal risk score
+      end note
+    endif
+
+    :Get CTSCustID for return;
+    note right
+      **CTSCustID**:
+      - Auto-generated (for new)
+      - Retrieved (for existing)
+      - Used for subsequent operations
+      - Primary key in CTS system
+    end note
+
+    :Add to result set;
+    note right
+      **Result Record**:
+      - CTSCustID
+      - CustID
+      - IsRobot (flag)
+    end note
+
+  repeat while (More customers?) is (yes)
+  -> no;
+}
+
+:Return InsertPAProbationResult[];
+note right
+  **Return Type**: List<InsertPAProbationResult>
+  
+  **Result Structure**:
+  {
+    "CTSCustID": 789012,
+    "CustID": 123456,
+    "IsRobot": false
+  }
+  
+  **Usage**:
+  - CTSCustID for internal tracking
+  - CustID for external reference
+  - IsRobot for logic separation
+  
+  **Next Steps**:
+  1. Filter by IsRobot flag
+  2. Insert PA Logic (regular)
+  3. Insert Robot Logic (robots)
+  4. Push to MainDB
+end note
+
+:Log Execution;
+note right
+  **Logging**:
+  - Customer count processed
+  - Insert count
+  - Update count
+  - Robot count detected
+  - Execution time
+  - Any errors/warnings
+end note
+
+stop
+
+note bottom
+  **Insert/Update Logic**:
+  - UPSERT pattern (INSERT or UPDATE)
+  - Based on CustID existence
+  - Preserves CTSCustID for existing
+  - Generates new CTSCustID for new
+  
+  **Probation Period Management**:
+  - Tracks PA customers during observation
+  - Automatic end date calculation
+  - Can be extended manually
+  - Triggers monitoring rules
+  
+  **Robot Detection Integration**:
+  - Automated detection during insert
+  - IsRobot flag for downstream processing
+  - Separate logic for robots vs regular PA
+  - Enhanced monitoring for robots
+  
+  **Table Schema (CTSCustomerClassification)**:
+  - CTSCustID (PK, auto-increment)
+  - CustID (FK, indexed)
+  - CategoryID (indexed)
+  - CategoryName
+  - TurnoverRM
+  - WinlossRM
+  - BetCount
+  - ActiveDays
+  - ProbationStartDate
+  - ProbationEndDate
+  - RelevantCategoryID (for monitoring)
+  - IsRobot (flag)
+  - InsertedDate
+  - UpdatedDate
+  
+  **Performance Considerations**:
+  - Batch insert (multiple customers)
+  - JSON parsing overhead
+  - Index on CustID for lookups
+  - Index on CategoryID for filtering
+  - Transaction wrapper for atomicity
+end note
+
+@enduml
+

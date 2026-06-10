@@ -1,0 +1,233 @@
+@startuml MatchMonitorClassification_DatabaseFlow
+title Match Monitor Classification - Database Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam handwritten false
+skinparam databaseBackgroundColor #E8F5E9
+skinparam databaseBorderColor #4CAF50
+skinparam noteBackgroundColor #FFF9C4
+skinparam noteBorderColor #FBC02D
+skinparam activityBackgroundColor #E3F2FD
+skinparam activityBorderColor #1976D2
+
+|Service Layer|
+start
+:ClassifyMatchMonitor Job Triggered;
+
+|DataAccess|
+:ClassifyMatchMonitor();
+
+|CTS_DataCenter (MySQL)|
+:Execute SP: **CTS_DC_CustClassification_MatchMonitor_Classify**;
+note right
+  **Database**: CTS_DataCenter.ctsServiceAdmin
+  **Timeout**: Default
+  
+  **Purpose**: Get ONE match and run detection
+  
+  **Returns 3 ResultSets**:
+  
+  **ResultSet 1: ClassifyGBMMCustInfosEntity[]**
+  - CustID (bigint)
+  - SportGroupID (int)
+  - CategoryID (int) - CC type
+  - CategoryName (varchar)
+  - Reason (varchar) - Detection reason
+  - [Other classification fields]
+  
+  **ResultSet 2: MMDetailIDList (string)**
+  - Comma-separated fraud ticket IDs
+  - Example: "12345,67890,11111"
+  - Used for marking completion
+  
+  **ResultSet 3: MatchID (int?)**
+  - Current match being processed
+  - NULL if no match in queue
+  
+  **Key Logic**:
+  ```sql
+  -- Select ONE unprocessed match (FIFO)
+  SELECT TOP 1 MatchID
+  FROM CTSMatchMonitor
+  WHERE IsProcessed = 0
+  ORDER BY ID ASC
+  
+  -- Run group betting detection
+  -- Identify fraud tickets
+  -- Extract customer info
+  -- Return results
+  ```
+  
+  **Detection Rules**:
+  - Group betting patterns
+  - Suspicious bet amounts
+  - Related customers
+  - Multi-bettype analysis
+end note
+
+:Return 3 ResultSets;
+
+|Service Layer|
+:Parse into ClassifyGBMatchMonitorModel;
+note right
+  **Model Structure**:
+  - CustInfos (ResultSet 1)
+  - MMDetailIDList (ResultSet 2)
+  - MatchID (ResultSet 3)
+end note
+
+if (Has CustInfos?) then (yes)
+  partition "Insert Problem Account" {
+    |Service Layer|
+    :Convert to InsertProblemAccountEntity[];
+    
+    |ProblemAccountServices|
+    :InsertProblemAccountPackage();
+    
+    |CTS_DataCenter (MySQL)|
+    :INSERT/UPDATE CTSCustomerClassification;
+    note right
+      **Insert/Update Customer CC**:
+      
+      ```sql
+      INSERT INTO CTSCustomerClassification
+      (CustID, CategoryID, CategoryName, 
+       SportGroupID, IsPA, ...)
+      VALUES (...)
+      ON DUPLICATE KEY UPDATE
+        CategoryID = VALUES(CategoryID),
+        IsPA = 1,
+        LastModifiedDate = NOW()
+      ```
+      
+      **Sets**:
+      - CC category (CategoryID)
+      - PA flag (IsPA = 1)
+      - Sport group
+      - Reason for classification
+    end note
+    
+    :Return Inserted CustIDs[];
+  }
+  
+  partition "Push to External" {
+    |Service Layer|
+    :PushExternalProblemAcountPackage(CustIDs);
+    
+    :Batch CustIDs (500 per batch);
+    
+    |bodb_VR2Model (SQL Server)|
+    :UPDATE MainDB Customer Classification;
+    note right
+      **External System Sync**:
+      
+      **Target**: MainDB
+      **Batch Size**: 500
+      
+      **Update**:
+      ```sql
+      UPDATE CustomerClassification
+      SET CategoryID = @CategoryID,
+          IsPA = 1,
+          UpdatedDate = GETDATE()
+      WHERE CustID IN (@CustIDs)
+      ```
+      
+      **Purpose**:
+      - Sync CC status to MainDB
+      - Update PA flag externally
+      - Maintain data consistency
+    end note
+  }
+endif
+
+|Service Layer|
+:ClassifyMatchMonitorCompleted(model);
+
+|DataAccess|
+if (Has MatchID?) then (yes)
+  |CTS_DataCenter (MySQL)|
+  :Execute SP: **CTS_DC_CustClassification_MatchMonitor_Completed**;
+  note right
+    **Database**: CTS_DataCenter.ctsServiceAdmin
+    
+    **Purpose**: Mark match as processed
+    
+    **Input**:
+    - ip_MatchID (int) - Match that was processed
+    - ip_MMDetailsIDList (string) - Fraud ticket IDs
+    
+    **Update Logic**:
+    ```sql
+    -- Parse comma-separated IDs
+    CREATE TEMPORARY TABLE #TempIDs (ID INT)
+    INSERT INTO #TempIDs
+    SELECT value FROM STRING_SPLIT(@ip_MMDetailsIDList, ',')
+    
+    -- Mark tickets as processed
+    UPDATE CTSMatchMonitorDetail
+    SET IsProcessed = 1,
+        ProcessedDate = NOW()
+    WHERE ID IN (SELECT ID FROM #TempIDs)
+      AND MatchID = @ip_MatchID
+    
+    -- Update match status
+    UPDATE CTSMatchMonitor
+    SET IsCompleted = 1,
+        CompletedDate = NOW()
+    WHERE MatchID = @ip_MatchID
+    ```
+    
+    **Purpose**:
+    - Remove from processing queue
+    - Prevent duplicate processing
+    - Track completion time
+  end note
+endif
+
+|Service Layer|
+:Complete;
+
+note right
+  **Job Completion**:
+  - ONE match processed
+  - Customers classified
+  - Data pushed to MainDB
+  - Match marked as done
+  - Ready for next run
+end note
+
+stop
+
+note right
+  **Key Database Operations**:
+  
+  **Read Operations**:
+  1. CTSMatchMonitor (SELECT unprocessed)
+  2. CTSMatchMonitorDetail (SELECT fraud tickets)
+  3. Detection logic queries
+  
+  **Write Operations**:
+  1. CTSCustomerClassification (INSERT/UPDATE CC)
+  2. CTSMatchMonitorDetail (UPDATE IsProcessed)
+  3. CTSMatchMonitor (UPDATE IsCompleted)
+  4. MainDB sync (UPDATE external)
+  
+  **Databases Used**:
+  - CTS_DataCenter (MySQL) - Primary CTS database
+  - bodb_VR2Model (SQL Server) - MainDB for external sync
+  
+  **Transaction Management**:
+  - Each SP handles its own transaction
+  - Failure in external push doesn't rollback CC insert
+  - Completion marking is independent
+  
+  **Performance**:
+  - One match at a time prevents overload
+  - Batch size 500 for external push
+  - Indexed on IsProcessed, MatchID
+  - FIFO queue maintains order
+end note
+
+@enduml
+

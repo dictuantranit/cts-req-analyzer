@@ -1,0 +1,166 @@
+@startuml NormalAccountClassification_MainFlow
+!theme plain
+title Normal Account Classification - Main Business Flow
+
+start
+:Job Triggered (HTTP POST);
+note right
+    Endpoint: /api/classificationJobs/normalAccountClassification
+    Parameter: batchInternalSize (int, default: 5000)
+end note
+
+:NormalAccountClassificationJobService.Execute(batchInternalSize);
+
+if (batchInternalSize <= 0) then (yes)
+  :Set batchInternalSize = 5000;
+  note right
+      Default batch size
+  end note
+else (no)
+  :Use provided batchInternalSize;
+endif
+
+:GetNormalPoolCustomers();
+  :Call CTS_GeneralNormalClassification_NormalPool_Get [SP];
+  note right
+      Database: bodb_VR2Model (SQL Server)
+      Timeout: 300 seconds
+      
+      Parameters:
+      - @ScannedMaxId (OUTPUT)
+      
+      Logic:
+      - Get unprocessed customers from Normal Pool
+      - Order by Priority DESC, ID ASC
+      - Return customer info + flags
+      
+      Returns:
+      - CustId
+      - IsRealtimeOnly
+      - ScanTaggingType
+      - ScanSpecialLicSubType
+      - ScannedMaxId (OUTPUT)
+  end note
+
+if (Has Customers?) then (yes)
+  :Chunk customers by batchInternalSize;
+  
+  repeat :For each chunk
+    :Prepare GetCurrentCCParamModel;
+    note right
+        Extract:
+        - CustID
+        - ScanSpecialLicSubType
+    end note
+    
+    :GetCurrentCustomerCategory(custInfos);
+      :Serialize custInfos to JSON;
+      :Call CTS_DC_CustClassification_Normal_GetCurrentCategory [SP];
+      note right
+          Database: CTS_DataCenter (MySQL)
+          Timeout: 300 seconds
+          
+          Parameters:
+          - @ip_CustInfo (JSON)
+          
+          Logic:
+          - Parse JSON customer list
+          - Get current classification
+          - Get classification flags
+          
+          Returns:
+          - CustID
+          - CategoryID
+          - IsNewCreated
+          - IsProbationLastDay
+          - IsSpecialLicSubCC
+      end note
+  repeat while (More chunks?)
+  
+  :Join Pool data with Category data;
+  note right
+      LINQ Join:
+      - NormalPoolCustomers (from VR2)
+      - CustomerCategories (from DataCenter)
+      
+      Result: GetCurrentCustomerCategoryModel
+      - CustId, CategoryId
+      - IsNewCreated, IsProbationLastDay
+      - IsRealtimeOnly, ScanTaggingType
+      - ScanSpecialLicSubType, IsSpecialLicSubCC
+  end note
+  
+  partition "Parallel Classification (4 Threads)" {
+    :Chunk joined data by batchInternalSize;
+    
+    :Process in parallel with 4 threads;
+    note right
+        AsParallel()
+        .WithDegreeOfParallelism(4)
+        .ForAll(custBatch => ...)
+        
+        4 concurrent classification threads
+    end note
+    
+    repeat :For each batch (parallel)
+      :Serialize batch to XML;
+      note right
+          GetCurrentCustomerCategoryModel
+          → XML String
+          
+          Using ToXmlString() extension
+      end note
+      
+      :ClassifyNormalPoolCustomers(customerXML);
+        :Call CTS_GeneralNormalClassification_NormalPool_Classify [SP];
+        note right
+            Database: bodb_VR2Model (SQL Server)
+            Timeout: 300 seconds
+            
+            Parameters:
+            - @CustomersXML (XML)
+            
+            Logic:
+            - Parse XML customer list
+            - Apply classification based on:
+              * Current CategoryId
+              * IsNewCreated
+              * IsProbationLastDay
+              * IsRealtimeOnly
+              * ScanTaggingType
+              * ScanSpecialLicSubType
+              * IsSpecialLicSubCC
+            - Insert/Update CustomerClassification
+        end note
+      
+      :ClearNormalPoolCustomers(custIds, scannedMaxID);
+        :Join custIds to comma-separated string;
+        :Call CTS_GeneralNormalClassification_NormalPool_Clear [SP];
+        note right
+            Database: bodb_VR2Model (SQL Server)
+            Timeout: 300 seconds
+            
+            Parameters:
+            - @ListCustId (comma-separated)
+            - @ScannedMaxId
+            
+            Logic:
+            - DELETE FROM Normal Pool
+            - WHERE CustId IN (list)
+            - OR ID <= ScannedMaxId
+            - Dual cleanup strategy
+        end note
+    repeat while (More batches in parallel?)
+  }
+  
+else (no)
+  note right
+    No customers in Normal Pool
+  end note
+endif
+
+:Return Success;
+stop
+
+@enduml
+

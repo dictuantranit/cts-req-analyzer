@@ -1,0 +1,102 @@
+@startuml DangerMonitor_Sequence_DetailPage
+!theme plain
+title Danger Monitor Detail Page - Sequence Diagram
+
+actor User
+participant "DangerMonitor\nController" as Controller
+participant "DangerMonitor\nService" as Service
+participant "MatchMonitor\nService" as MMService
+participant "CriteriaService\n(Repository)" as Repository
+database "SQL Server\nDatabase" as DB
+
+== Load Detail Page ==
+User -> Controller: GET Detail(para)
+activate Controller
+
+Controller -> Service: GetBettypesFromCache()
+Service --> Controller: Bettypes data
+
+Controller -> Controller: GetGroupCustomerClass()
+Controller -> Controller: GetReasonGroups()
+Controller -> Controller: Set ViewBag properties
+Controller --> User: Return View (Detail.cshtml)
+deactivate Controller
+
+== Load Detail Filters ==
+User -> Controller: POST GetMatchMonitorFilter(para)
+activate Controller
+
+Controller -> Controller: Set para.TicketType = Single
+Controller -> Service: GetMatchMonitorFilter(para)
+activate Service
+
+alt para.IsImportNewTicket
+    Service -> Service: GetMatchMonitorFilterImportNew(para)
+else para.TypeOfTickets == TicketFraud
+    Service -> Service: GetFraudMMFilter(para)
+else para.IsSupportShowAllTickets
+    Service -> Service: GetAllMMFilter(para)
+end
+
+Service -> MMService: GetMatchMonitorFilter(para)
+activate MMService
+
+MMService -> Repository: Fetch<MMDetailFilterEntity>(criteria)
+activate Repository
+
+Repository -> DB: EXEC CTS_MatchMonitor_Details_GetFilter [SP]
+activate DB
+note right of DB: Stored Procedure:\nCTS_MatchMonitor_Details_GetFilter\n@MatchID, @BettypeID, @BetID\n@ViewMode = 2 (Danger Monitor)
+DB --> Repository: Return Filter Data
+deactivate DB
+
+Repository --> MMService: MMDetailFilterViewModel
+deactivate Repository
+
+MMService --> Service: MMDetailFilterViewModel
+deactivate MMService
+
+Service --> Controller: MMDetailFilterViewModel
+deactivate Service
+
+Controller --> User: JSON Response { data: filterData }
+deactivate Controller
+
+== Load Detail Tickets ==
+User -> Controller: POST GetMatchMonitorDetail(para, filter)
+activate Controller
+
+Controller -> Controller: Set para.TicketType = Single
+Controller -> Service: GetMatchMonitorDetail(para, filter)
+activate Service
+
+Service -> MMService: GetMatchMonitorDetail(para, filter)
+activate MMService
+
+MMService -> MMService: GetMatchMonitorDetailForCache(para, ...)
+MMService -> MMService: GetSingleTicketDetailForCache(...)
+
+MMService -> Repository: Fetch<TicketDetailEntity>(criteria)
+activate Repository
+
+Repository -> DB: EXEC CTS_MatchMonitor_Details_GetTicket [SP]
+activate DB
+note right of DB: Stored Procedure:\nCTS_MatchMonitor_Details_GetTicket\n@MatchID, @BettypeID, @BetID\n@QueryType = 3 (Danger Monitor)
+DB --> Repository: Return Ticket Details
+deactivate DB
+
+Repository --> MMService: TicketDetailEntity
+deactivate Repository
+
+MMService -> MMService: Process & Transform data
+MMService --> Service: MMDetailTicketListViewModel
+deactivate MMService
+
+Service --> Controller: MMDetailTicketListViewModel
+deactivate Service
+
+Controller --> User: JSON Response { data: tickets, recordsFiltered: count }
+deactivate Controller
+
+@enduml
+
