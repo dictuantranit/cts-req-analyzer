@@ -35,7 +35,8 @@ class KnowledgeBase:
             try:
                 self.vector_store = FAISS.load_local(
                     persist_directory,
-                    self.embeddings
+                    self.embeddings,
+                    allow_dangerous_deserialization=True
                 )
                 print(f"✓ Loaded existing vector store from {persist_directory}")
             except Exception as e:

@@ -3,8 +3,21 @@ RAG Engine for requirement analysis.
 """
 import os
 from typing import List
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.llms import Ollama
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    try:
+        from langchain_community.chat_models.openai import ChatOpenAI
+    except ImportError:
+        ChatOpenAI = None
+
+try:
+    from langchain_community.llms import Ollama
+except ImportError:
+    try:
+        from langchain_community.llms.ollama import Ollama
+    except ImportError:
+        Ollama = None
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from core.indexer import KnowledgeBase
 from models.schema import RetrievalResult, AnalysisResult
@@ -48,7 +61,8 @@ class RAGEngine:
                     "Get free key at: https://makersuite.google.com/app/apikey"
                 )
             
-            return SimpleGemini(api_key=api_key)
+            gemini_model = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+            return SimpleGemini(api_key=api_key, model=gemini_model)
             
         elif provider == 'ollama':
             print("✓ Using Ollama (local LLM)")

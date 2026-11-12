@@ -1,5 +1,6 @@
 # Core LangChain dependencies
 langchain
+langchain-community
 openai
 
 # For Gemini API (works with Python 3.7+)
